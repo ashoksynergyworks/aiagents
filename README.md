@@ -8,4 +8,3 @@ AI agent that answers reporting questions from the `df-dev` MongoDB (referrals/a
 
 Agent: `app/api/chat/route.ts`, two read-only tools over 7 collections: `aggregate` (answers, max 50 rows) and `export_csv` (full result as a CSV download, max 10,000 rows). Model falls back to `z-ai/glm-5.3` if the primary fails. Pipeline guard and CSV escaping: `app/api/chat/guard.ts`, checked by `npm test`. UI: `app/page.tsx`. Schema reference (also the agent's system prompt): `docs/df-dev-schema.md`.
 
-`npm run seed` still loads the old dummy doctor data, into `ai_agent` only (it wipes that DB's collections).
