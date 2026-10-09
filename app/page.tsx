@@ -1,69 +1,384 @@
-import Image from "next/image";
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+
+type CsvFile = { name: string; csv: string; rows: number };
+type Msg = { role: "user" | "assistant"; content: string; used?: string[]; files?: CsvFile[]; fallback?: string };
+type Chat = { id: string; title: string; messages: Msg[] };
+
+const SUGGESTIONS = [
+  { label: "Monthly referrals", prompt: "How many referrals came in each month this year?" },
+  { label: "Top specialist groups", prompt: "Top 10 specialist groups by referrals in the last 90 days" },
+  { label: "Office report (CSV)", prompt: "CSV of appointments created with each specialist office last month" },
+  { label: "High-risk by PCP", prompt: "Which PCPs sent the most high-risk referrals?" },
+];
+
+const NUMERIC = /^-?[\d,.]+%?$/;
+
+const ICONS = {
+  send: "M12 19V5M5 12l7-7 7 7",
+  plus: "M12 5v14M5 12h14",
+  menu: "M4 7h16M4 12h16M4 17h10",
+  check: "M20 6 9 17l-5-5",
+  download: "M12 4v11m-4.5-4.5L12 15l4.5-4.5M5 20h14",
+  copy: "M8 8V5a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-3M5 8h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z",
+};
+
+function Icon({ name, className = "size-5" }: { name: keyof typeof ICONS; className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className={className}>
+      <path d={ICONS[name]} />
+    </svg>
+  );
+}
+
+// a referral: navy PCP dot handing off to a rose specialist dot; the arc runs while a query is in flight
+function Mark({ className = "", running = false }: { className?: string; running?: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className={`shrink-0 text-primary ${className}`}>
+      <path
+        d="M6 15C6 9.5 9.5 6 15 6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeDasharray={running ? "4 3" : undefined}
+        className={running ? "animate-travel motion-reduce:animate-none" : undefined}
+      />
+      <circle cx="6" cy="18" r="3" className="fill-primary" />
+      <circle cx="18" cy="6" r="3" className="fill-secondary" />
+    </svg>
+  );
+}
+
+function download(f: CsvFile) {
+  // BOM so Excel reads UTF-8 names (e.g. "Hà Nội") correctly
+  const url = URL.createObjectURL(new Blob(["\uFEFF", f.csv], { type: "text/csv;charset=utf-8" }));
+  const a = Object.assign(document.createElement("a"), { href: url, download: f.name });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url));
+}
+
+// ponytail: only markdown pipe tables are parsed, the rest stays plain text; add react-markdown if replies need more
+function Reply({ text }: { text: string }) {
+  const blocks: (string | string[][])[] = [];
+  for (const line of text.split("\n")) {
+    const t = line.trim();
+    const last = blocks.at(-1);
+    if (t.startsWith("|")) {
+      if (/^[|\s:-]+$/.test(t) && t.includes("---")) continue; // header separator row
+      const cells = t.replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+      if (Array.isArray(last)) last.push(cells);
+      else blocks.push([cells]);
+    } else if (typeof last === "string") blocks[blocks.length - 1] = `${last}\n${line}`;
+    else blocks.push(line);
+  }
+  return blocks.map((b, i) => {
+    if (typeof b === "string") return b.trim() && <p key={i} className="whitespace-pre-wrap">{b.trim()}</p>;
+    const [head, ...body] = b;
+    const num = head.map((_, j) => body.length > 0 && body.every((r) => NUMERIC.test(r[j] ?? "")));
+    return (
+      <div key={i} className="overflow-x-auto rounded-xl border border-line bg-surface font-sans">
+        <table className="w-full text-sm">
+          <thead className="bg-sidebar text-muted">
+            <tr>
+              {head.map((c, j) => (
+                <th key={j} scope="col" className={`px-4 py-2.5 font-medium whitespace-nowrap ${num[j] ? "text-right" : "text-left"}`}>
+                  {c}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-line">
+            {body.map((r, k) => (
+              <tr key={k}>
+                {head.map((_, j) => (
+                  <td key={j} className={`px-4 py-2.5 ${num[j] ? "text-right tabular-nums" : ""}`}>
+                    {r[j]}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  });
+}
 
 export default function Home() {
+  // ponytail: recents live in memory for this tab; persist to localStorage if people want them across reloads
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState<number | null>(null);
+  const [menu, setMenu] = useState(false);
+  const endRef = useRef<HTMLDivElement>(null);
+
+  const active = chats.find((c) => c.id === activeId);
+  const messages = active?.messages ?? [];
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ block: "end" }); // braces: newer browsers return a Promise here
+  }, [active?.messages, loading]);
+
+  function newChat() {
+    setActiveId(null);
+    setInput("");
+    setError("");
+    setMenu(false);
+  }
+
+  async function send(text: string) {
+    text = text.trim();
+    if (!text || loading) return;
+    const id = activeId ?? crypto.randomUUID();
+    const prev = messages;
+    const next: Msg[] = [...prev, { role: "user", content: text }];
+    const put = (msgs: Msg[]) =>
+      setChats((cs) =>
+        cs.some((c) => c.id === id) ? cs.map((c) => (c.id === id ? { ...c, messages: msgs } : c)) : [{ id, title: text, messages: msgs }, ...cs],
+      );
+    put(next);
+    setActiveId(id);
+    setInput("");
+    setError("");
+    setLoading(id);
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: next.map(({ role, content }) => ({ role, content })) }), // CSVs stay client-side
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Request failed");
+      put([...next, { role: "assistant", content: data.reply, used: data.used, files: data.files, fallback: data.fallback }]);
+    } catch (e) {
+      // roll back so the question can be edited and re-sent
+      if (prev.length) put(prev);
+      else setChats((cs) => cs.filter((c) => c.id !== id));
+      setInput(text);
+      setError((e as Error).message);
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function copy(i: number, text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(i);
+      setTimeout(() => setCopied((c) => (c === i ? null : c)), 1500);
+    } catch {}
+  }
+
+  const alert = error && (
+    <p role="alert" className="mb-3 rounded-xl border border-secondary/30 bg-secondary/8 px-4 py-2.5 text-sm">
+      {error}
+    </p>
+  );
+
+  const composer = (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        send(input);
+      }}
+      className="rounded-2xl border border-line bg-surface shadow-[0_1px_2px_oklch(0.25_0.012_80/0.05),0_8px_28px_-12px_oklch(0.25_0.012_80/0.18)] transition-colors duration-200 focus-within:border-primary/50"
+    >
+      <label htmlFor="q" className="sr-only">
+        Ask for a report
+      </label>
+      <textarea
+        id="q"
+        rows={1}
+        autoFocus
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            send(input);
+          }
+        }}
+        placeholder="Ask for a report, e.g. referrals per specialist group last month"
+        className="block max-h-60 min-h-14 w-full resize-none bg-transparent px-4 pt-4 text-base outline-none field-sizing-content placeholder:text-muted"
+      />
+      <div className="flex justify-end px-2.5 pb-2.5">
+        <button
+          aria-label="Send"
+          disabled={!!loading || !input.trim()}
+          className="grid size-11 cursor-pointer place-items-center rounded-xl bg-primary text-paper transition-[background-color,transform] duration-150 hover:bg-primary-strong focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-primary active:scale-95 disabled:cursor-not-allowed disabled:opacity-35"
+        >
+          <Icon name="send" />
+        </button>
+      </div>
+    </form>
+  );
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className="flex h-dvh">
+      <aside
+        className={`${menu ? "fixed inset-y-0 left-0 z-30 flex" : "hidden"} w-72 flex-col border-r border-line bg-sidebar md:static md:flex md:w-64`}
+      >
+        <div className="flex items-center gap-2.5 px-5 pt-5 pb-4">
+          <Mark className="size-6" />
+          <span className="font-serif text-xl tracking-[-0.01em]">Referral Reports</span>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+        <div className="px-3">
+          <button
+            onClick={newChat}
+            className="flex min-h-11 w-full cursor-pointer items-center gap-3 rounded-xl px-2 text-sm font-medium transition-colors duration-150 hover:bg-paper focus-visible:outline-3 focus-visible:outline-primary"
           >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+            <span className="grid size-7 place-items-center rounded-full bg-secondary text-paper">
+              <Icon name="plus" className="size-4" />
+            </span>
+            New report
+          </button>
         </div>
-      </main>
+        <nav aria-label="Recent reports" className="mt-6 flex-1 overflow-y-auto px-3">
+          <p className="px-2 pb-2 text-xs font-medium text-muted">Recents</p>
+          {chats.length === 0 ? (
+            <p className="px-2 text-sm text-muted">Reports you run in this tab show up here.</p>
+          ) : (
+            <ul className="space-y-0.5">
+              {chats.map((c) => (
+                <li key={c.id}>
+                  <button
+                    onClick={() => {
+                      setActiveId(c.id);
+                      setError("");
+                      setMenu(false);
+                    }}
+                    aria-current={c.id === activeId ? "page" : undefined}
+                    className="block min-h-10 w-full cursor-pointer truncate rounded-lg px-2 text-left text-sm text-ink/80 transition-colors duration-150 hover:bg-paper/70 focus-visible:outline-3 focus-visible:outline-primary aria-[current=page]:bg-paper aria-[current=page]:font-medium aria-[current=page]:text-ink"
+                  >
+                    {c.title}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </nav>
+        <p className="flex items-center gap-2 border-t border-line px-5 py-4 text-xs text-muted">
+          <span className="size-1.5 rounded-full bg-primary" />
+          <span>
+            Reads <span className="font-mono">df-dev</span>, read-only
+          </span>
+        </p>
+      </aside>
+      {menu && <button aria-label="Close menu" onClick={() => setMenu(false)} className="fixed inset-0 z-20 bg-ink/30 md:hidden" />}
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        <h1 className="sr-only">Referral Reports</h1>
+        <header className="flex items-center justify-between border-b border-line px-1 md:hidden">
+          <button
+            aria-label="Open menu"
+            aria-expanded={menu}
+            onClick={() => setMenu(true)}
+            className="grid size-11 cursor-pointer place-items-center rounded-lg focus-visible:outline-3 focus-visible:outline-primary"
+          >
+            <Icon name="menu" />
+          </button>
+          <span className="truncate px-2 font-serif text-lg">{active?.title ?? "Referral Reports"}</span>
+          <button
+            aria-label="New report"
+            onClick={newChat}
+            className="grid size-11 cursor-pointer place-items-center rounded-lg focus-visible:outline-3 focus-visible:outline-primary"
+          >
+            <Icon name="plus" />
+          </button>
+        </header>
+
+        {messages.length === 0 ? (
+          <main className="flex flex-1 flex-col items-center justify-center px-4 pb-[12vh]">
+            <div className="w-full max-w-2xl">
+              <h2 className="mb-8 flex items-center justify-center gap-3 text-center font-serif text-[1.75rem] leading-tight tracking-[-0.015em] text-balance md:text-[2.5rem]">
+                <Mark className="size-8 md:size-10" />
+                What would you like to report on?
+              </h2>
+              {alert}
+              {composer}
+              <div className="mt-4 flex flex-wrap justify-center gap-2">
+                {SUGGESTIONS.map((s) => (
+                  <button
+                    key={s.label}
+                    onClick={() => send(s.prompt)}
+                    title={s.prompt}
+                    className="min-h-11 cursor-pointer rounded-xl border border-line bg-surface px-3.5 text-sm text-ink/80 transition-colors duration-150 hover:border-primary/40 hover:text-ink focus-visible:outline-3 focus-visible:outline-primary"
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </main>
+        ) : (
+          <>
+            <main role="log" aria-live="polite" className="flex-1 overflow-y-auto">
+              <div className="mx-auto max-w-3xl space-y-8 px-4 py-8 md:py-10">
+                {messages.map((m, i) =>
+                  m.role === "user" ? (
+                    <div key={i} className="flex animate-rise justify-end motion-reduce:animate-none">
+                      <p className="max-w-[85%] rounded-2xl bg-primary-soft px-4 py-2.5 whitespace-pre-wrap">{m.content}</p>
+                    </div>
+                  ) : (
+                    <article key={i} className="animate-rise motion-reduce:animate-none">
+                      <div className="space-y-3 font-serif text-[1.0625rem] leading-7">
+                        <Reply text={m.content} />
+                      </div>
+                      {m.files?.map((f) => (
+                        <button
+                          key={f.name}
+                          onClick={() => download(f)}
+                          aria-label={`Download ${f.name}`}
+                          className="group mt-4 flex w-full max-w-md cursor-pointer items-center gap-3 rounded-xl border border-line bg-surface p-3 text-left transition-colors duration-150 hover:border-primary/40 focus-visible:outline-3 focus-visible:outline-primary"
+                        >
+                          <span className="grid size-10 shrink-0 place-items-center rounded-lg bg-primary-soft text-[0.6875rem] font-semibold tracking-wide text-primary">CSV</span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm font-medium">{f.name}</span>
+                            <span className="block text-xs text-muted">
+                              {f.rows.toLocaleString()} {f.rows === 1 ? "row" : "rows"}
+                            </span>
+                          </span>
+                          <span className="grid size-9 shrink-0 place-items-center rounded-lg text-muted transition-colors duration-150 group-hover:bg-primary group-hover:text-paper">
+                            <Icon name="download" className="size-4" />
+                          </span>
+                        </button>
+                      ))}
+                      <div className="mt-2 flex items-center gap-2 text-xs text-muted">
+                        <button
+                          onClick={() => copy(i, m.content)}
+                          aria-label={copied === i ? "Copied" : "Copy reply"}
+                          className="-ml-2 grid size-9 cursor-pointer place-items-center rounded-lg transition-colors duration-150 hover:bg-sidebar hover:text-ink focus-visible:outline-3 focus-visible:outline-primary"
+                        >
+                          <Icon name={copied === i ? "check" : "copy"} className="size-4" />
+                        </button>
+                        {!!m.used?.length && <span>Queried {m.used.join(", ")}</span>}
+                        {m.fallback && <span>· answered by fallback model {m.fallback}</span>}
+                      </div>
+                    </article>
+                  ),
+                )}
+                {loading === activeId && (
+                  <p role="status" className="flex items-center gap-3 text-sm text-muted">
+                    <Mark running className="size-7" />
+                    Running queries. Reports can take up to a minute.
+                  </p>
+                )}
+                <div ref={endRef} />
+              </div>
+            </main>
+            <div className="mx-auto w-full max-w-3xl px-4 pb-3">
+              {alert}
+              {composer}
+              <p className="mt-2 text-center text-xs text-muted">Answers come from live dev data and can be wrong. Check the numbers before you share them.</p>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
