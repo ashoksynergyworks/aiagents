@@ -5,6 +5,15 @@ import { useEffect, useRef, useState } from "react";
 type CsvFile = { name: string; csv: string; rows: number };
 type Msg = { role: "user" | "assistant"; content: string; used?: string[]; files?: CsvFile[]; fallback?: string };
 type Chat = { id: string; title: string; messages: Msg[] };
+type DbStatus = { ok: boolean; db?: string; error?: string };
+
+async function checkDb(): Promise<DbStatus> {
+  const s = await fetch("/api/chat")
+    .then((r) => r.json())
+    .catch((e: Error) => ({ ok: false, error: e.message }));
+  console.log("[db]", s);
+  return s;
+}
 
 const SUGGESTIONS = [
   { label: "Monthly referrals", prompt: "How many referrals came in each month this year?" },
@@ -115,7 +124,12 @@ export default function Home() {
   const [error, setError] = useState("");
   const [copied, setCopied] = useState<number | null>(null);
   const [menu, setMenu] = useState(false);
+  const [db, setDb] = useState<DbStatus | null>(null); // null while checking
   const endRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    checkDb().then(setDb);
+  }, []);
 
   const active = chats.find((c) => c.id === activeId);
   const messages = active?.messages ?? [];
@@ -146,6 +160,8 @@ export default function Home() {
     setInput("");
     setError("");
     setLoading(id);
+    const t0 = performance.now();
+    console.log("[chat] →", text);
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
@@ -154,8 +170,10 @@ export default function Home() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Request failed");
+      console.log("[chat] ←", `${Math.round(performance.now() - t0)}ms`, { used: data.used, files: data.files?.map((f: CsvFile) => `${f.name} (${f.rows} rows)`), fallback: data.fallback });
       put([...next, { role: "assistant", content: data.reply, used: data.used, files: data.files, fallback: data.fallback }]);
     } catch (e) {
+      console.error("[chat] failed", `${Math.round(performance.now() - t0)}ms`, e);
       // roll back so the question can be edited and re-sent
       if (prev.length) put(prev);
       else setChats((cs) => cs.filter((c) => c.id !== id));
@@ -262,12 +280,33 @@ export default function Home() {
             </ul>
           )}
         </nav>
-        <p className="flex items-center gap-2 border-t border-line px-5 py-4 text-xs text-muted">
-          <span className="size-1.5 rounded-full bg-primary" />
-          <span>
-            Reads <span className="font-mono">df-dev</span>, read-only
-          </span>
-        </p>
+        <div className="border-t border-line px-5 py-3 text-xs text-muted">
+          <div className="flex items-center gap-2">
+            <span className={`size-1.5 shrink-0 rounded-full ${!db ? "animate-pulse bg-muted" : db.ok ? "bg-primary" : "bg-secondary"}`} />
+            <span role="status" className="min-w-0 flex-1 truncate">
+              {!db ? (
+                "Checking database…"
+              ) : db.ok ? (
+                <>
+                  Reads <span className="font-mono">{db.db}</span>, read-only
+                </>
+              ) : (
+                "Database not connected"
+              )}
+            </span>
+            <button
+              onClick={() => {
+                setDb(null);
+                checkDb().then(setDb);
+              }}
+              disabled={!db}
+              className="min-h-8 cursor-pointer rounded-lg border border-line px-2.5 font-medium text-ink/80 transition-colors duration-150 hover:bg-paper focus-visible:outline-3 focus-visible:outline-primary disabled:cursor-wait disabled:opacity-50"
+            >
+              {db?.ok === false ? "Retry" : "Check"}
+            </button>
+          </div>
+          {db?.error && <p className="mt-1.5 line-clamp-3 wrap-break-word text-secondary">{db.error}</p>}
+        </div>
       </aside>
       {menu && <button aria-label="Close menu" onClick={() => setMenu(false)} className="fixed inset-0 z-20 bg-ink/30 md:hidden" />}
 

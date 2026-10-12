@@ -1,12 +1,15 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { BSON, MongoClient } from "mongodb";
+import { connection } from "next/server";
 import { COLLECTIONS, parsePipeline, strip, toCsv } from "./guard";
 
 // ponytail: cached on globalThis so dev hot-reloads don't open a new pool each time
 const g = globalThis as unknown as { mongo?: MongoClient };
 const mongo = (g.mongo ??= new MongoClient(process.env.MONGODB_URI!));
-const db = mongo.db();
+// pinned, not taken from the URI: Atlas connection strings carry no db name, so the driver silently fell back to an empty "test"
+// ponytail: tied to docs/df-dev-schema.md below; another DB needs its own schema doc too
+const db = mongo.db("df-dev");
 
 // tried in order; a request that falls back stays on the fallback for its remaining steps
 const MODELS = [process.env.NVIDIA_MODEL ?? "nvidia/nemotron-3-super-120b-a12b", "z-ai/glm-5.3"];
@@ -88,24 +91,49 @@ async function aggregate({ collection, pipeline }: Args, limit: number) {
   return db.collection(collection).aggregate([...stages, { $limit: limit }], { maxTimeMS: 15_000 }).toArray();
 }
 
-async function complete(messages: object[], from: number) {
+async function complete(messages: object[], from: number, tag: string) {
   const errors: string[] = [];
   for (let i = from; i < MODELS.length; i++) {
+    const t = Date.now();
+    let cause = "";
     const res = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`, "Content-Type": "application/json" },
       // reasoning models: thinking counts toward max_tokens, 1024 left no room for the answer
       body: JSON.stringify({ model: MODELS[i], messages, tools, temperature: 0.2, max_tokens: 4096 }),
       signal: AbortSignal.timeout(60_000),
-    }).catch(() => null);
-    if (res?.ok) return { msg: (await res.json()).choices[0].message, model: i };
-    errors.push(`${MODELS[i]}: ${res ? `${res.status} ${(await res.text()).slice(0, 200)}` : "timed out"}`);
-    console.warn("[model failed]", errors.at(-1));
+    }).catch((e: Error) => ((cause = e.message), null));
+    if (res?.ok) {
+      const { choices, usage } = await res.json();
+      const msg = choices[0].message;
+      console.log(tag, "[ai]", MODELS[i], `${Date.now() - t}ms`, `tokens in=${usage?.prompt_tokens} out=${usage?.completion_tokens}`, `finish=${choices[0].finish_reason}`, `tool_calls=${msg.tool_calls?.length ?? 0}`);
+      return { msg, model: i };
+    }
+    errors.push(`${MODELS[i]}: ${res ? `${res.status} ${(await res.text()).slice(0, 200)}` : cause}`);
+    console.warn(tag, "[ai] failed", `${Date.now() - t}ms`, errors.at(-1));
   }
   throw new Error(`NVIDIA API failed for every model. ${errors.join(" | ")}`);
 }
 
+// DB status for the sidebar; connect() revives a closed client, so the same call is the retry
+export async function GET() {
+  await connection(); // never prerender a health check
+  const t = Date.now();
+  try {
+    await mongo.connect();
+    await db.command({ ping: 1 });
+    console.log("[db] ping ok", db.databaseName, `${Date.now() - t}ms`);
+    return Response.json({ ok: true, db: db.databaseName });
+  } catch (e) {
+    console.error("[db] ping failed", `${Date.now() - t}ms`, (e as Error).message);
+    return Response.json({ ok: false, db: db.databaseName, error: (e as Error).message }, { status: 503 });
+  }
+}
+
 export async function POST(req: Request) {
+  // short id so interleaved requests can be told apart in the terminal
+  const tag = `[chat ${crypto.randomUUID().slice(0, 8)}]`;
+  const t0 = Date.now();
   if (!process.env.NVIDIA_API_KEY) return Response.json({ error: "Set NVIDIA_API_KEY in .env and restart the dev server." }, { status: 500 });
 
   const body = await req.json().catch(() => ({}));
@@ -115,15 +143,23 @@ export async function POST(req: Request) {
     .filter((m: { role: string }) => m.role === "user" || m.role === "assistant")
     .map((m: { role: string; content: unknown }) => ({ role: m.role, content: String(m.content) }));
 
+  console.log(tag, "question:", history.at(-1)?.content, `(${history.length} msgs)`);
+
   const messages: object[] = [{ role: "system", content: system() }, ...history];
   const used = new Set<string>();
   const files: CsvFile[] = [];
   let model = 0;
-  const done = (reply: string) => Response.json({ reply, used: [...used], files, ...(model > 0 && { fallback: MODELS[model] }) });
+  const done = (reply: string) => {
+    console.log(tag, `done in ${Date.now() - t0}ms`, `used=${[...used]}`, `files=${files.map((f) => `${f.name}(${f.rows})`)}`);
+    return Response.json({ reply, used: [...used], files, ...(model > 0 && { fallback: MODELS[model] }) });
+  };
 
   for (let step = 0; step < 10; step++) {
-    const out = await complete(messages, model).catch((e: Error) => e);
-    if (out instanceof Error) return Response.json({ error: out.message }, { status: 502 });
+    const out = await complete(messages, model, tag).catch((e: Error) => e);
+    if (out instanceof Error) {
+      console.error(tag, `failed in ${Date.now() - t0}ms`, out.message);
+      return Response.json({ error: out.message }, { status: 502 });
+    }
     model = out.model;
     const { msg } = out;
     // only the standard fields, so a fallback model can read history written by another (reasoning_content etc. dropped)
@@ -135,18 +171,23 @@ export async function POST(req: Request) {
       try {
         const args: Args = JSON.parse(call.function.arguments || "{}");
         used.add(args.collection);
-        console.log(`[${call.function.name}]`, args.collection, typeof args.pipeline === "string" ? args.pipeline : JSON.stringify(args.pipeline));
-        let result: object;
-        if (call.function.name === "export_csv") {
-          const rows = await aggregate(args, CSV_ROWS);
+        const csv = call.function.name === "export_csv";
+        console.log(tag, `[db] ${call.function.name}`, args.collection, typeof args.pipeline === "string" ? args.pipeline : JSON.stringify(args.pipeline));
+        const t = Date.now();
+        const rows = await aggregate(args, csv ? CSV_ROWS : 50);
+        // ponytail: row counts only, rows can hold patient data
+        console.log(tag, `[db] ${args.collection}: ${rows.length} rows in ${Date.now() - t}ms`);
+        let result: object = rows;
+        if (csv) {
           const name = `${String(args.filename || "report").replace(/[^\w-]+/g, "-").slice(0, 80)}.csv`;
           files.push({ name, csv: toCsv(rows), rows: rows.length });
           result = { attached: name, rows: rows.length, capped: rows.length === CSV_ROWS, preview: rows.slice(0, 20) };
-        } else result = await aggregate(args, 50);
+        }
         // secrets are also stripped from output, which covers whole user docs pulled in by $lookup
         content = BSON.EJSON.stringify(result, strip, undefined, { relaxed: true });
         if (content.length > MAX_CHARS) content = content.slice(0, MAX_CHARS) + "…[truncated: $project fewer fields or $group instead]";
       } catch (e) {
+        console.warn(tag, `[tool] ${call.function.name} error:`, (e as Error).message);
         content = JSON.stringify({ error: (e as Error).message }); // let the model see it and retry
       }
       messages.push({ role: "tool", tool_call_id: call.id, content });
