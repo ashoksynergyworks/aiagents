@@ -3,16 +3,18 @@ import { join } from "node:path";
 import { BSON, MongoClient } from "mongodb";
 import { connection } from "next/server";
 import { COLLECTIONS, parsePipeline, strip, toCsv } from "./guard";
+import { complete, ContentFilteredError, TOOL_NAMES } from "./model";
 
 // ponytail: cached on globalThis so dev hot-reloads don't open a new pool each time
 const g = globalThis as unknown as { mongo?: MongoClient };
-const mongo = (g.mongo ??= new MongoClient(process.env.MONGODB_URI!));
+const mongo = (g.mongo ??= new MongoClient(process.env.MONGODB_URI || "mongodb://localhost:27017/df-dev"));
 // pinned, not taken from the URI: Atlas connection strings carry no db name, so the driver silently fell back to an empty "test"
 // ponytail: tied to docs/df-dev-schema.md below; another DB needs its own schema doc too
 const db = mongo.db("df-dev");
 
-// tried in order; a request that falls back stays on the fallback for its remaining steps
-const MODELS = [process.env.NVIDIA_MODEL ?? "nvidia/nemotron-3-super-120b-a12b", "z-ai/glm-5.3"];
+// Tried in order; a request that falls back stays on that model for its remaining steps.
+// Don't retry the same model twice if the configured primary and fallback are identical.
+const MODELS = [...new Set([process.env.NVIDIA_MODEL?.trim() || "nvidia/nemotron-3-super-120b-a12b", process.env.NVIDIA_FALLBACK_MODEL?.trim() || "z-ai/glm-5.3"])];
 const MAX_CHARS = 30_000;
 const CSV_ROWS = 10_000;
 // the schema doc is the model's reference, so a field missing there is a field the agent can't find
@@ -61,7 +63,7 @@ const tools = [
   {
     type: "function",
     function: {
-      name: "aggregate",
+      name: TOOL_NAMES[0],
       description: "Run a read-only MongoDB aggregation pipeline on one collection. Returns at most 50 documents as Extended JSON.",
       parameters: { type: "object", properties: pipelineArgs, required: ["collection", "pipeline"] },
     },
@@ -69,7 +71,7 @@ const tools = [
   {
     type: "function",
     function: {
-      name: "export_csv",
+      name: TOOL_NAMES[1],
       description: `Run a read-only aggregation pipeline and attach the full result (up to ${CSV_ROWS} rows) to the reply as a CSV download. Returns the row count and the first 20 rows.`,
       parameters: {
         type: "object",
@@ -89,30 +91,6 @@ async function aggregate({ collection, pipeline }: Args, limit: number) {
   // no-op when connected; revives the cached client if Mongo was down earlier (driver otherwise stays "Topology is closed")
   await mongo.connect();
   return db.collection(collection).aggregate([...stages, { $limit: limit }], { maxTimeMS: 15_000 }).toArray();
-}
-
-async function complete(messages: object[], from: number, tag: string) {
-  const errors: string[] = [];
-  for (let i = from; i < MODELS.length; i++) {
-    const t = Date.now();
-    let cause = "";
-    const res = await fetch("https://integrate.api.nvidia.com/v1/chat/completions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`, "Content-Type": "application/json" },
-      // reasoning models: thinking counts toward max_tokens, 1024 left no room for the answer
-      body: JSON.stringify({ model: MODELS[i], messages, tools, temperature: 0.2, max_tokens: 4096 }),
-      signal: AbortSignal.timeout(60_000),
-    }).catch((e: Error) => ((cause = e.message), null));
-    if (res?.ok) {
-      const { choices, usage } = await res.json();
-      const msg = choices[0].message;
-      console.log(tag, "[ai]", MODELS[i], `${Date.now() - t}ms`, `tokens in=${usage?.prompt_tokens} out=${usage?.completion_tokens}`, `finish=${choices[0].finish_reason}`, `tool_calls=${msg.tool_calls?.length ?? 0}`);
-      return { msg, model: i };
-    }
-    errors.push(`${MODELS[i]}: ${res ? `${res.status} ${(await res.text()).slice(0, 200)}` : cause}`);
-    console.warn(tag, "[ai] failed", `${Date.now() - t}ms`, errors.at(-1));
-  }
-  throw new Error(`NVIDIA API failed for every model. ${errors.join(" | ")}`);
 }
 
 // DB status for the sidebar; connect() revives a closed client, so the same call is the retry
@@ -148,45 +126,54 @@ export async function POST(req: Request) {
   const messages: object[] = [{ role: "system", content: system() }, ...history];
   const used = new Set<string>();
   const files: CsvFile[] = [];
+  let failedTools = 0;
   let model = 0;
   const done = (reply: string) => {
+    if (failedTools && !used.size) {
+      console.warn(tag, `no database query succeeded (${failedTools} tool errors)`);
+      return Response.json({ error: "No database query succeeded. Check the database connection or rephrase your question." }, { status: 502 });
+    }
     console.log(tag, `done in ${Date.now() - t0}ms`, `used=${[...used]}`, `files=${files.map((f) => `${f.name}(${f.rows})`)}`);
     return Response.json({ reply, used: [...used], files, ...(model > 0 && { fallback: MODELS[model] }) });
   };
 
   for (let step = 0; step < 10; step++) {
-    const out = await complete(messages, model, tag).catch((e: Error) => e);
+    const out = await complete(messages, tools, MODELS, model, tag).catch((e: Error) => e);
     if (out instanceof Error) {
       console.error(tag, `failed in ${Date.now() - t0}ms`, out.message);
-      return Response.json({ error: out.message }, { status: 502 });
+      return Response.json({ error: out.message }, { status: out instanceof ContentFilteredError ? 422 : 502 });
     }
     model = out.model;
     const { msg } = out;
-    // only the standard fields, so a fallback model can read history written by another (reasoning_content etc. dropped)
-    messages.push({ role: "assistant", content: msg.content ?? "", tool_calls: msg.tool_calls });
-    if (!msg.tool_calls?.length) return done(msg.content || "No answer came back. Try again or rephrase.");
+    // Only standard fields, so a fallback model can read history written by another (reasoning_content etc. dropped).
+    messages.push({ role: "assistant", content: msg.content, ...(msg.tool_calls && { tool_calls: msg.tool_calls }) });
+    if (!msg.tool_calls?.length) return done(msg.content);
 
     for (const call of msg.tool_calls) {
       let content;
       try {
-        const args: Args = JSON.parse(call.function.arguments || "{}");
-        used.add(args.collection);
-        const csv = call.function.name === "export_csv";
+        const args: Args = JSON.parse(call.function.arguments);
+        if (!TOOL_NAMES.includes(call.function.name)) throw new Error("Unknown tool");
+        const csv = call.function.name === TOOL_NAMES[1];
         console.log(tag, `[db] ${call.function.name}`, args.collection, typeof args.pipeline === "string" ? args.pipeline : JSON.stringify(args.pipeline));
         const t = Date.now();
         const rows = await aggregate(args, csv ? CSV_ROWS : 50);
         // ponytail: row counts only, rows can hold patient data
         console.log(tag, `[db] ${args.collection}: ${rows.length} rows in ${Date.now() - t}ms`);
         let result: object = rows;
+        let file: CsvFile | undefined;
         if (csv) {
           const name = `${String(args.filename || "report").replace(/[^\w-]+/g, "-").slice(0, 80)}.csv`;
-          files.push({ name, csv: toCsv(rows), rows: rows.length });
+          file = { name, csv: toCsv(rows), rows: rows.length };
           result = { attached: name, rows: rows.length, capped: rows.length === CSV_ROWS, preview: rows.slice(0, 20) };
         }
         // secrets are also stripped from output, which covers whole user docs pulled in by $lookup
         content = BSON.EJSON.stringify(result, strip, undefined, { relaxed: true });
         if (content.length > MAX_CHARS) content = content.slice(0, MAX_CHARS) + "…[truncated: $project fewer fields or $group instead]";
+        used.add(args.collection);
+        if (file) files.push(file);
       } catch (e) {
+        failedTools++;
         console.warn(tag, `[tool] ${call.function.name} error:`, (e as Error).message);
         content = JSON.stringify({ error: (e as Error).message }); // let the model see it and retry
       }
