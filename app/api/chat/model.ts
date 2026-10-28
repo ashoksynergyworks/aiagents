@@ -1,8 +1,43 @@
-// NVIDIA's OpenAI-compatible endpoint can return HTTP 200 with an unusable completion.
+// OpenAI-compatible endpoints can return HTTP 200 with an unusable completion.
 // Validate the whole turn before executing any tool call so a bad primary response can fall back.
 export const TOOL_NAMES = ["aggregate", "export_csv"] as const;
 type ToolName = (typeof TOOL_NAMES)[number];
 const MAX_TOOL_CALLS = 8; // avoid an unbounded number of database queries in one step
+
+// Any OpenAI-compatible /chat/completions endpoint is a provider: hosted APIs, NVIDIA NIM, Ollama, vLLM, Bedrock (/openai/v1).
+// LLM_MODELS is an ordered "<provider>:<model>,…" list. A provider needs <PROVIDER>_BASE_URL (built in below) and
+// <PROVIDER>_API_KEY, except one given its own base URL, which may run without auth (a local server).
+const BASE_URLS: Record<string, string> = { nvidia: "https://integrate.api.nvidia.com/v1", openrouter: "https://openrouter.ai/api/v1" };
+// The first four made valid tool calls on 2026-10-26 (many catalog models 404 per account or time out on the free tier).
+// NVIDIA leads: its free tier allows ~40 req/min vs OpenRouter's 50 req/day. OpenRouter sits third so an
+// NVIDIA-wide outage costs two attempts. openrouter/free picks any free model your OpenRouter privacy settings allow.
+export const DEFAULT_MODELS =
+  "nvidia:nvidia/nemotron-3-ultra-550b-a55b,nvidia:minimaxai/minimax-m3.1-flash,openrouter:openrouter/free,nvidia:nvidia/nemotron-3.5-lightning-30b-a3b,nvidia:nvidia/nemotron-3.5-super-vl-120b-a12b,openrouter:google/gemma-4-31b-it:free";
+
+export type Model = { id: string; name: string; url: string; key?: string; timeout: number };
+
+export function parseModels(list: string, env: Record<string, string | undefined>): Model[] {
+  const models = new Map<string, Model>(); // keyed by id, so a repeated entry is tried once
+  for (const id of list.split(",").map((s) => s.trim()).filter(Boolean)) {
+    const i = id.indexOf(":"); // first colon only: "openrouter:x/y:free", "ollama:qwen3:32b"
+    const P = id.slice(0, Math.max(i, 0)).toUpperCase().replace(/\W/g, "_");
+    const base = env[`${P}_BASE_URL`]?.trim();
+    const url = base || BASE_URLS[P.toLowerCase()];
+    const key = env[`${P}_API_KEY`]?.trim() || undefined;
+    if (i < 1 || i === id.length - 1 || !url || (!key && !base)) {
+      console.warn("[ai] skipping model", id, i < 1 ? "(write it as provider:model)" : !url ? `(set ${P}_BASE_URL)` : `(set ${P}_API_KEY)`);
+      continue;
+    }
+    models.set(id, { id, name: id.slice(i + 1), url: `${url.replace(/\/+$/, "")}/chat/completions`, key, timeout: Number(env[`${P}_TIMEOUT_MS`]) || 60_000 });
+  }
+  return [...models.values()];
+}
+
+// A failed model is skipped by later requests for a while instead of costing another timeout each time.
+const COOLDOWN_MS = 5 * 60_000;
+// ponytail: per server process; move to a shared store if several instances serve the app
+const g = globalThis as unknown as { llmCooldown?: Map<string, number> };
+export const cooldown = (g.llmCooldown ??= new Map<string, number>()); // model id → when it may be tried again
 
 type ToolCall = { id: string; type: "function"; function: { name: ToolName; arguments: string } };
 export type ModelMessage = { content: string; tool_calls?: ToolCall[] };
@@ -63,35 +98,53 @@ function parseCompletion(body: unknown): { msg: ModelMessage; finish: unknown; u
   return { msg: { content, ...(tool_calls?.length && { tool_calls }) }, finish: choice.finish_reason, usage: record(response?.usage) };
 }
 
-export async function complete(messages: object[], tools: object[], models: readonly string[], from: number, tag: string, fetcher: typeof fetch = fetch) {
+// Tries the current model, then the rest of the list wrapping around. Each gets the same messages, so whichever
+// model picks the request up continues from the queries already run. Models in cooldown are skipped unless all are.
+export async function complete(messages: object[], tools: object[], models: readonly Model[], from: number, tag: string, fetcher: typeof fetch = fetch, retryAfterMs = 5_000) {
   const errors: string[] = [];
-  for (let i = from; i < models.length; i++) {
-    const t = Date.now();
-    try {
-      const res = await fetcher("https://integrate.api.nvidia.com/v1/chat/completions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${process.env.NVIDIA_API_KEY}`, "Content-Type": "application/json" },
-        // Reasoning models use part of the token budget for thinking.
-        body: JSON.stringify({ model: models[i], messages, tools, temperature: 0.2, max_tokens: 4096 }),
-        signal: AbortSignal.timeout(60_000),
-      });
-      if (!res.ok) throw new InvalidCompletion(`HTTP ${res.status}`);
-      let body: unknown;
-      try {
-        body = await res.json();
-      } catch {
-        throw new InvalidCompletion("invalid JSON response");
-      }
-      const { msg, finish, usage } = parseCompletion(body);
-      console.log(tag, "[ai]", models[i], `${Date.now() - t}ms`, `tokens in=${usage?.prompt_tokens} out=${usage?.completion_tokens}`, `finish=${finish}`, `tool_calls=${msg.tool_calls?.length ?? 0}`);
-      return { msg, model: i };
-    } catch (e) {
-      if (e instanceof ContentFilteredError) throw e;
-      // Provider error bodies can echo request contents: only report status or our own validation errors.
-      const reason = e instanceof InvalidCompletion ? e.message : e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError") ? "timeout" : "network error";
-      errors.push(`${models[i]}: ${reason}`);
-      console.warn(tag, "[ai] failed", `${Date.now() - t}ms`, errors.at(-1));
+  const order = models.map((_, k) => (from + k) % models.length);
+  const ready = order.filter((i) => !((cooldown.get(models[i].id) ?? 0) > Date.now()));
+  let attempts = ready.length ? ready : order;
+  for (let round = 0; round < 2 && attempts.length; round++) {
+    // Free tiers mostly fail with short 429 bursts: rate-limited models get one more try before the request fails.
+    if (round) {
+      console.warn(tag, `[ai] every model failed; retrying ${attempts.length} rate-limited in ${retryAfterMs}ms`);
+      await new Promise((r) => setTimeout(r, retryAfterMs));
     }
+    const limited: number[] = [];
+    for (const i of attempts) {
+      const m = models[i];
+      const t = Date.now();
+      try {
+        const res = await fetcher(m.url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", ...(m.key && { Authorization: `Bearer ${m.key}` }) },
+          // Reasoning models use part of the token budget for thinking.
+          body: JSON.stringify({ model: m.name, messages, tools, temperature: 0.2, max_tokens: 4096 }),
+          signal: AbortSignal.timeout(m.timeout),
+        });
+        if (res.status === 429) limited.push(i);
+        if (!res.ok) throw new InvalidCompletion(`HTTP ${res.status}`);
+        let body: unknown;
+        try {
+          body = await res.json();
+        } catch {
+          throw new InvalidCompletion("invalid JSON response");
+        }
+        const { msg, finish, usage } = parseCompletion(body);
+        console.log(tag, "[ai]", m.id, `${Date.now() - t}ms`, `tokens in=${usage?.prompt_tokens} out=${usage?.completion_tokens}`, `finish=${finish}`, `tool_calls=${msg.tool_calls?.length ?? 0}`);
+        cooldown.delete(m.id);
+        return { msg, model: i };
+      } catch (e) {
+        if (e instanceof ContentFilteredError) throw e;
+        // Provider error bodies can echo request contents: only report status or our own validation errors.
+        const reason = e instanceof InvalidCompletion ? e.message : e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError") ? "timeout" : "network error";
+        errors.push(`${m.id}: ${reason}`);
+        cooldown.set(m.id, Date.now() + COOLDOWN_MS);
+        console.warn(tag, "[ai] failed", `${Date.now() - t}ms`, errors.at(-1));
+      }
+    }
+    attempts = limited;
   }
-  throw new Error(`NVIDIA API failed for every model. ${errors.join(" | ")}`);
+  throw new Error(`Every model failed. ${errors.join(" | ")}`);
 }

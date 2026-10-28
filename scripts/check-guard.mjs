@@ -1,7 +1,7 @@
 // Self-check for the agent's pipeline guard and CSV export. Run: npm test
 import assert from "node:assert/strict";
 import { BSON } from "mongodb";
-import { parsePipeline, toCsv } from "../app/api/chat/guard.ts";
+import { parsePipeline, splitFollowUps, toCsv } from "../app/api/chat/guard.ts";
 
 const blocked = [
   [{ $out: "x" }],
@@ -44,4 +44,18 @@ assert.equal(
   ].join("\r\n"),
 );
 
-console.log(`guard ok: ${blocked.length} blocked, ${allowed.length} allowed, csv escaping ok`);
+const split = (s) => splitFollowUps(s.join("\n"));
+assert.deepEqual(split(["12 referrals."]), { reply: "12 referrals.", followUps: [] });
+assert.deepEqual(split(["Key findings", "- Up 5%", "", "Follow-up questions", "- Why?", "- Which office?"]), {
+  reply: "Key findings\n- Up 5%",
+  followUps: ["Why?", "Which office?"],
+});
+assert.deepEqual(split(["A", "**Follow-up questions:**", "1. **Why?**", "2) 2026 referrals by month?", "Note: dev data."]), {
+  reply: "A\nNote: dev data.", // text after the bullets stays; a question starting with a number keeps it
+  followUps: ["Why?", "2026 referrals by month?"],
+});
+assert.deepEqual(split(["A", "Follow-up questions:", "- 1", "- 2", "- 3", "- 4", "- 5"]).followUps, ["1", "2", "3", "4"]);
+assert.deepEqual(split(["A", "**Follow‑up questions**", "1. Why?  "]), { reply: "A", followUps: ["Why?"] }); // non-breaking hyphen
+assert.deepEqual(split(["A", "Follow-up questions", "None this time."]), { reply: "A\nFollow-up questions\nNone this time.", followUps: [] });
+
+console.log(`guard ok: ${blocked.length} blocked, ${allowed.length} allowed, csv escaping ok, follow-ups split`);

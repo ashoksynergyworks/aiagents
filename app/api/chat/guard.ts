@@ -32,6 +32,21 @@ function cell(v: unknown): string {
 
 const quote = (s: string) => (/[",\r\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s);
 
+const FOLLOW_UPS = /^[\s*_#]*follow\W?up questions[\s*_:]*$/i; // \W: models write "-", " " or a non-breaking hyphen (U+2011)
+const BULLET = /^\s*(?:[-*•]|\d+[.)])\s+/;
+
+// The reply ends with a "Follow-up questions" label and bullets; they go to the UI as buttons, not text.
+// Only the bullets right under the last such label are taken; anything after them stays in the reply.
+export function splitFollowUps(text: string): { reply: string; followUps: string[] } {
+  const lines = text.split("\n");
+  const i = lines.findLastIndex((l) => FOLLOW_UPS.test(l));
+  let j = i + 1;
+  while (i >= 0 && j < lines.length && (BULLET.test(lines[j]) || !lines[j].trim())) j++;
+  const followUps = lines.slice(i + 1, j).map((l) => l.replace(BULLET, "").replaceAll("**", "").trim()).filter(Boolean);
+  if (i < 0 || !followUps.length) return { reply: text, followUps: [] };
+  return { reply: [...lines.slice(0, i), ...lines.slice(j)].join("\n").trim(), followUps: followUps.slice(0, 4) };
+}
+
 // RFC 4180 CSV; columns are the union of top-level keys, so the pipeline's $project decides the layout
 export function toCsv(rows: Document[]): string {
   const cols = [...new Set(rows.flatMap(Object.keys))].filter((k) => !SECRETS.includes(k));

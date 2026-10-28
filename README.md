@@ -1,12 +1,34 @@
 # Referral Reports (POC)
 
-AI agent that answers reporting questions from the `df-dev` MongoDB (referrals/appointments, PCPs, specialists, providers, users) using an NVIDIA-hosted LLM with tool calling.
+AI agent that answers reporting questions from the `df-dev` MongoDB (referrals/appointments, PCPs, specialists, providers, users) using LLMs with tool calling, from any OpenAI-compatible provider.
 
 1. MongoDB running at `MONGODB_URI` (default `mongodb://localhost:27017/df-dev`; the database name is pinned to `df-dev`)
-2. Put your key from https://build.nvidia.com in `.env` as `NVIDIA_API_KEY`. Optional: `NVIDIA_MODEL` (default `nvidia/nemotron-3-super-120b-a12b`) and `NVIDIA_FALLBACK_MODEL` (default `z-ai/glm-5.3`).
+2. Put `NVIDIA_API_KEY` (https://build.nvidia.com) and/or `OPENROUTER_API_KEY` (https://openrouter.ai) in `.env`. The default model list (`DEFAULT_MODELS` in `app/api/chat/model.ts`) uses both; models whose provider has no key are skipped. To use other models, see below.
 3. `npm run dev` → http://localhost:3000
 
-Agent: `app/api/chat/route.ts`, two read-only tools over 7 collections: `aggregate` (answers, max 50 rows) and `export_csv` (full result as a CSV download, max 10,000 rows). A model call switches to the fallback on HTTP/network/timeout errors or unusable responses (bad JSON, missing/empty answer, truncated output, invalid tool calls); subsequent turns in that request stay on the fallback. A content-filter block is **not** retried on another model. Both models use the same NVIDIA endpoint and key: the fallback cannot fix an invalid key or a provider outage, and it is not a replacement for MongoDB. Database/query errors are returned to the agent to correct; if tool calls fail and none succeed, it returns an error instead of an unverified report. If both models fail, the API returns a 502 with sanitized failure reasons.
+Agent: `app/api/chat/route.ts`, two read-only tools over 7 collections: `aggregate` (answers, max 50 rows) and `export_csv` (full result as a CSV download, max 10,000 rows). Database/query errors are returned to the agent to correct; if tool calls fail and none succeed, it returns an error instead of an unverified report.
+
+Insights: under a report, the agent adds Key findings, Growth opportunities (Priority, Opportunity, Supporting data, Recommended action, Expected benefit), a Recommendation and Follow-up questions, in the same model turn, from the same query results. The API returns the follow-ups separately as `followUps[]`, and the UI shows them as buttons. Metric definitions (status buckets for Requests, Confirmed, Lost and so on) live in `docs/df-dev-schema.md`. The database has no website, marketing or patient-feedback data, so the agent says so instead of guessing. This is a POC with no login or per-organisation access: every user sees all organisations. Plan and later phases: `docs/analytics-insights-plan.md`.
+
+## Models and fallback
+
+`LLM_MODELS` is an ordered, comma-separated list of `provider:model` (split on the first colon, so `openrouter:google/gemma-4-31b-it:free` and `ollama:qwen3:32b` work). Any OpenAI-compatible `/chat/completions` endpoint can be a provider: set `<PROVIDER>_BASE_URL`, plus `<PROVIDER>_API_KEY` if it needs auth. `nvidia` and `openrouter` have built-in base URLs and need their key. Optional `<PROVIDER>_TIMEOUT_MS` per attempt (default 60000; raise it for slow local models). Models must support tool calling.
+
+```env
+# local Ollama / vLLM / LM Studio: no key needed
+OLLAMA_BASE_URL=http://localhost:11434/v1
+OLLAMA_TIMEOUT_MS=180000
+# self-hosted NVIDIA NIM
+NIM_BASE_URL=http://nim-host:8000/v1
+# AWS Bedrock, OpenAI-compatible endpoint with a Bedrock API key
+BEDROCK_BASE_URL=https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1
+BEDROCK_API_KEY=...
+LLM_MODELS=nim:meta/llama-3.3-70b-instruct,bedrock:openai.gpt-oss-120b-1:0,nvidia:nvidia/nemotron-3-ultra-550b-a55b,ollama:qwen3:32b
+```
+
+Each step of a request tries the current model, then the rest of the list (wrapping around), with the whole conversation so far, so queries already run are kept when another model takes over. A step falls back on HTTP/network/timeout errors or unusable responses (bad JSON, missing/empty answer, truncated output, invalid tool calls); later steps stay on the model that worked. A failed model is skipped by later requests for 5 minutes, unless every model is cooling down. If every model fails, rate-limited (HTTP 429) ones get one more try after 5 s, then the API returns a 502 with sanitized failure reasons. A content-filter block is **not** retried on another model.
+
+Free tiers are flaky and change often: NVIDIA lists models an account can't call (HTTP 404), and OpenRouter's free models are limited to 50 requests/day (1,000 after buying $10 of credits) and many are blocked unless free-model training is allowed at https://openrouter.ai/settings/privacy. Free tool-calling models on OpenRouter: `curl -s https://openrouter.ai/api/v1/models | jq -r '.data[] | select(.pricing.prompt=="0" and (.supported_parameters|index("tools"))) | .id'`.
 
 Pipeline guard and CSV escaping: `app/api/chat/guard.ts`; model fallback checks: `app/api/chat/model.ts`. Run `npm test` without a database or API key. UI: `app/page.tsx`. Schema reference (also the agent's system prompt): `docs/df-dev-schema.md`.
 

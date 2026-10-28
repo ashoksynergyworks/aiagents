@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 type CsvFile = { name: string; csv: string; rows: number };
-type Msg = { role: "user" | "assistant"; content: string; used?: string[]; files?: CsvFile[]; fallback?: string };
+type Msg = { role: "user" | "assistant"; content: string; used?: string[]; files?: CsvFile[]; fallback?: string; followUps?: string[] };
 type Chat = { id: string; title: string; messages: Msg[] };
 type DbStatus = { ok: boolean; db?: string; error?: string };
 
@@ -20,9 +20,15 @@ const SUGGESTIONS = [
   { label: "Top specialist groups", prompt: "Top 10 specialist groups by referrals in the last 90 days" },
   { label: "Office report (CSV)", prompt: "CSV of appointments created with each specialist office last month" },
   { label: "High-risk by PCP", prompt: "Which PCPs sent the most high-risk referrals?" },
+  { label: "This month vs last", prompt: "Show me appointment analytics for this month compared with last month" },
 ];
 
+const CHIP =
+  "min-h-11 cursor-pointer rounded-xl border border-line bg-surface px-3.5 text-sm text-ink/80 transition-colors duration-150 hover:border-primary/40 hover:text-ink focus-visible:outline-3 focus-visible:outline-primary";
+
 const NUMERIC = /^-?[\d,.]+%?$/;
+// insight section labels the agent writes on their own line (route.ts system prompt)
+const LABEL = /^[\s*_#]*(key findings|growth opportunities|recommendation|follow\W?up questions)[\s*_:]*$/i;
 
 const ICONS = {
   send: "M12 19V5M5 12l7-7 7 7",
@@ -70,8 +76,9 @@ function download(f: CsvFile) {
 
 // ponytail: only markdown pipe tables are parsed, the rest stays plain text; add react-markdown if replies need more
 function Reply({ text }: { text: string }) {
-  const blocks: (string | string[][])[] = [];
-  for (const line of text.split("\n")) {
+  const blocks: (string | string[][] | { label: string })[] = [];
+  // ponytail: models add **bold** despite the prompt; drop the markers rather than parse markdown
+  for (const line of text.replaceAll("**", "").split("\n")) {
     const t = line.trim();
     const last = blocks.at(-1);
     if (t.startsWith("|")) {
@@ -79,11 +86,18 @@ function Reply({ text }: { text: string }) {
       const cells = t.replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
       if (Array.isArray(last)) last.push(cells);
       else blocks.push([cells]);
-    } else if (typeof last === "string") blocks[blocks.length - 1] = `${last}\n${line}`;
+    } else if (LABEL.test(t)) blocks.push({ label: t.replace(/[*_#:]/g, "").trim() });
+    else if (typeof last === "string") blocks[blocks.length - 1] = `${last}\n${line}`;
     else blocks.push(line);
   }
   return blocks.map((b, i) => {
     if (typeof b === "string") return b.trim() && <p key={i} className="whitespace-pre-wrap">{b.trim()}</p>;
+    if (!Array.isArray(b))
+      return (
+        <h3 key={i} className="pt-3 font-sans text-sm font-medium text-muted">
+          {b.label}
+        </h3>
+      );
     const [head, ...body] = b;
     const num = head.map((_, j) => body.length > 0 && body.every((r) => NUMERIC.test(r[j] ?? "")));
     return (
@@ -171,7 +185,7 @@ export default function Home() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? "Request failed");
       console.log("[chat] ←", `${Math.round(performance.now() - t0)}ms`, { used: data.used, files: data.files?.map((f: CsvFile) => `${f.name} (${f.rows} rows)`), fallback: data.fallback });
-      put([...next, { role: "assistant", content: data.reply, used: data.used, files: data.files, fallback: data.fallback }]);
+      put([...next, { role: "assistant", content: data.reply, used: data.used, files: data.files, fallback: data.fallback, followUps: data.followUps }]);
     } catch (e) {
       console.error("[chat] failed", `${Math.round(performance.now() - t0)}ms`, e);
       // roll back so the question can be edited and re-sent
@@ -342,12 +356,7 @@ export default function Home() {
               {composer}
               <div className="mt-4 flex flex-wrap justify-center gap-2">
                 {SUGGESTIONS.map((s) => (
-                  <button
-                    key={s.label}
-                    onClick={() => send(s.prompt)}
-                    title={s.prompt}
-                    className="min-h-11 cursor-pointer rounded-xl border border-line bg-surface px-3.5 text-sm text-ink/80 transition-colors duration-150 hover:border-primary/40 hover:text-ink focus-visible:outline-3 focus-visible:outline-primary"
-                  >
+                  <button key={s.label} onClick={() => send(s.prompt)} title={s.prompt} className={CHIP}>
                     {s.label}
                   </button>
                 ))}
@@ -398,6 +407,15 @@ export default function Home() {
                         {!!m.used?.length && <span>Queried {m.used.join(", ")}</span>}
                         {m.fallback && <span>· answered by fallback model {m.fallback}</span>}
                       </div>
+                      {i === messages.length - 1 && !!m.followUps?.length && (
+                        <div role="group" aria-label="Follow-up questions" className="mt-3 flex flex-wrap gap-2">
+                          {m.followUps.map((q) => (
+                            <button key={q} onClick={() => send(q)} disabled={!!loading} className={`${CHIP} py-2 text-left disabled:cursor-wait disabled:opacity-50`}>
+                              {q}
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </article>
                   ),
                 )}

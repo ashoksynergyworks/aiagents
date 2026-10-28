@@ -39,6 +39,30 @@ Reference integrity: every `appointments.pcpId`, `specialistId`, `specialistGrou
 - Every collection has `createdAt`, `updatedAt`, `createdBy`, `updatedBy` (→ users), and `__v`. Every org has `address[]` with `{address, city, state, zipCode, country, timeZone, locationLongLat (GeoJSON Point, 2dsphere-indexed)}`, plus `profilePic` and `profileLogo`. These are omitted from the tables below.
 - **Sensitive, never expose:** `users.password`, `previousPasswords`, `otp`, `twoFactorAuthCode`, `sessionInfo`, `socketId`, `appointments.secureCode`. The agent strips these.
 
+## Metric definitions (use in every report)
+
+Booking status is `appointments.currentStatus`, the **latest** status: a referral that was scheduled and later completed reads COMPLETED. Group it into buckets:
+
+| Bucket | `currentStatus` |
+|---|---|
+| Pending | SUBMITTED, HOLD, REVIEWED, WORK_IN_PROGRESS |
+| Confirmed (patient was given a date) | DATE_ADDED, SCHEDULED, RESCHEDULED, COMPLETED, NOSHOW, RESCHEDULE_NOSHOW |
+| Lost | CANCELED, EXPIRED |
+| Ignored (left out of every count) | MOBILE_UNVERIFIED |
+
+| Metric | Definition (always exclude `isDeveloperAppointment: true` and MOBILE_UNVERIFIED) |
+|---|---|
+| Requests (referrals received) | appointments by `createdAt` in the period |
+| Confirmed | Confirmed bucket |
+| Completed / Cancelled / Expired / Rescheduled | COMPLETED / CANCELED / EXPIRED / RESCHEDULED |
+| No-shows | NOSHOW + RESCHEDULE_NOSHOW |
+| Open backlog | Pending bucket |
+| Scheduling rate / cancellation rate | Confirmed ÷ Requests / Cancelled ÷ Requests |
+
+- These are cohort counts: the current status of referrals **created** in the period, not status changes during it. Say so. A referral scheduled and then cancelled reads CANCELED, so it is not counted as Confirmed.
+- Recent referrals have had less time to complete, so a lower completion rate for a recent period is not by itself a decline.
+- An "imaging centre" or "centre" is a specialist office (`specialists`). Imaging referrals have `appointmentType` MRI_349 or `examType`/`bodyPart` set.
+
 ---
 
 ## appointments (2,503)
@@ -69,7 +93,7 @@ One referral / visit. Data runs from 2024-02 to 2026-09. 951 rows were created i
 
 | Field | Values (count) |
 |---|---|
-| `currentStatus` | SUBMITTED 2058, REVIEWED 197, WORK_IN_PROGRESS 61, RESCHEDULED 61, CANCELED 46, COMPLETED 32, NOSHOW 30, RESCHEDULE_NOSHOW 17, HOLD 1 |
+| `currentStatus` | SUBMITTED 2058, REVIEWED 197, WORK_IN_PROGRESS 61, RESCHEDULED 61, CANCELED 46, COMPLETED 32, NOSHOW 30, RESCHEDULE_NOSHOW 17, HOLD 1. Valid but no rows yet: SCHEDULED, DATE_ADDED, EXPIRED, MOBILE_UNVERIFIED. Buckets: see Metric definitions |
 | `appointmentSubStatus` | SUBMITTED, DATE_ADDED, REFERRAL_UPLOADED, CALLING, INFO_REQUESTED, PROVIDER_NOTES_UPLOADED, PROVIDER_NOTES_DOWNLOADED, NOTCONTACTED, PATIENT CALLED, REVIEWED, REFERRAL_REQUESTED, RESEARCH, NOSHOW |
 | `handledStatus` | UNHANDLED 1438, COMMENT_UNHANDLED 1003, HANDLED 62 |
 | `appointmentStatusAuthor` | "" (most), RESCHEDULED_BY_PCP, RESCHEDULED_BY_SPECIALIST_GROUP, CANCELED_BY_PCP, CANCELED_BY_SPECIALIST_GROUP, RESCHEDULED_BY_SPECIALIST, CANCELED_BY_SPECIALIST |
@@ -267,5 +291,30 @@ aggregate("pcps", [
 aggregate("appointments", [
   { "$match": { "appointmentStartDateTime": null, "currentStatus": "SUBMITTED", "createdAt": { "$lt": { "$date": "2026-10-02T00:00:00Z" } } } },
   { "$count": "n" }
+])
+
+// Metric | This period | Previous period | Change %: month to date vs the same days of last month, % change computed here
+aggregate("appointments", [
+  { "$match": { "isDeveloperAppointment": { "$ne": true }, "currentStatus": { "$ne": "MOBILE_UNVERIFIED" } } },
+  { "$set": { "day": { "$dateToString": { "format": "%Y-%m-%d", "date": "$createdAt", "timezone": "America/New_York" } } } },
+  { "$set": { "period": { "$switch": { "branches": [
+    { "case": { "$and": [{ "$gte": ["$day", "2026-10-01"] }, { "$lte": ["$day", "2026-10-27"] }] }, "then": "this" },
+    { "case": { "$and": [{ "$gte": ["$day", "2026-09-01"] }, { "$lte": ["$day", "2026-09-27"] }] }, "then": "last" }
+  ], "default": null } } } },
+  { "$match": { "period": { "$ne": null } } },
+  { "$set": { "m": [
+    { "k": "Requests", "o": 1, "v": 1 },
+    { "k": "Confirmed", "o": 2, "v": { "$cond": [{ "$in": ["$currentStatus", ["DATE_ADDED", "SCHEDULED", "RESCHEDULED", "COMPLETED", "NOSHOW", "RESCHEDULE_NOSHOW"]] }, 1, 0] } },
+    { "k": "Cancelled", "o": 3, "v": { "$cond": [{ "$eq": ["$currentStatus", "CANCELED"] }, 1, 0] } },
+    { "k": "Completed", "o": 4, "v": { "$cond": [{ "$eq": ["$currentStatus", "COMPLETED"] }, 1, 0] } },
+    { "k": "No-shows", "o": 5, "v": { "$cond": [{ "$in": ["$currentStatus", ["NOSHOW", "RESCHEDULE_NOSHOW"]] }, 1, 0] } }
+  ] } },
+  { "$unwind": "$m" },
+  { "$group": { "_id": { "k": "$m.k", "o": "$m.o" },
+    "cur": { "$sum": { "$cond": [{ "$eq": ["$period", "this"] }, "$m.v", 0] } },
+    "prev": { "$sum": { "$cond": [{ "$eq": ["$period", "last"] }, "$m.v", 0] } } } },
+  { "$sort": { "_id.o": 1 } },
+  { "$project": { "_id": 0, "Metric": "$_id.k", "This period": "$cur", "Previous period": "$prev",
+    "Change %": { "$cond": [{ "$eq": ["$prev", 0] }, null, { "$round": [{ "$multiply": [{ "$divide": [{ "$subtract": ["$cur", "$prev"] }, "$prev"] }, 100] }, 1] }] } } }
 ])
 ```

@@ -1,20 +1,40 @@
-// Self-check for NVIDIA completion fallback without an API key, network access, or MongoDB.
+// Self-check for model routing and fallback without API keys, network access, or MongoDB.
 import assert from "node:assert/strict";
-import { complete, ContentFilteredError } from "../app/api/chat/model.ts";
+import { complete, ContentFilteredError, cooldown, DEFAULT_MODELS, parseModels } from "../app/api/chat/model.ts";
 
-const models = ["primary", "backup"];
+// Provider and model split on the first colon; hosted providers need a key, one with its own base URL may run without.
+const env = { NVIDIA_API_KEY: "nv-key", OPENROUTER_API_KEY: "or-key", OLLAMA_BASE_URL: "http://localhost:11434/v1/", OLLAMA_TIMEOUT_MS: "180000" };
+const parsed = parseModels("nvidia:primary, openrouter:x/backup:free, ollama:qwen3:32b, nvidia:primary, mystery:m, no-provider, nvidia:", env);
+assert.deepEqual(
+  parsed.map((m) => [m.id, m.name, m.url, m.key, m.timeout]),
+  [
+    ["nvidia:primary", "primary", "https://integrate.api.nvidia.com/v1/chat/completions", "nv-key", 60000],
+    ["openrouter:x/backup:free", "x/backup:free", "https://openrouter.ai/api/v1/chat/completions", "or-key", 60000],
+    ["ollama:qwen3:32b", "qwen3:32b", "http://localhost:11434/v1/chat/completions", undefined, 180000],
+  ],
+);
+assert.deepEqual(parseModels("openrouter:a", {}), [], "hosted provider without a key is skipped");
+assert.equal(parseModels(DEFAULT_MODELS, { NVIDIA_API_KEY: "k", OPENROUTER_API_KEY: "k" }).length, 6);
+
+const models = parseModels("nvidia:primary,openrouter:backup", env);
+const names = models.map((m) => m.name);
+const known = [...models, ...parsed];
 const tools = [{ type: "function", function: { name: "aggregate", parameters: { type: "object" } } }];
 const answer = (content, finish_reason = "stop", more = {}) =>
   Response.json({ choices: [{ finish_reason, message: { content, ...more } }] });
 const toolCall = (args = '{"collection":"pcps","pipeline":[]}', name = "aggregate") => ({ id: "call-1", type: "function", function: { name, arguments: args } });
 
 function stub(...responses) {
+  cooldown.clear(); // each case starts like a fresh server
   const attempted = [];
   const fetcher = async (url, init) => {
-    assert.equal(url, "https://integrate.api.nvidia.com/v1/chat/completions");
     assert.ok(init.signal);
     const body = JSON.parse(init.body);
     assert.deepEqual(body.tools, tools);
+    // each model goes to its own provider's URL with that provider's key, and no header without one
+    const m = known.find((x) => x.name === body.model);
+    assert.equal(url, m.url);
+    assert.equal(init.headers.Authorization, m.key && `Bearer ${m.key}`);
     attempted.push(body.model);
     const response = responses[attempted.length - 1];
     if (response instanceof Error) throw response;
@@ -24,8 +44,8 @@ function stub(...responses) {
   return { attempted, fetcher };
 }
 
-async function run(mock, from = 0) {
-  return complete([{ role: "user", content: "a report" }], tools, models, from, "[test]", mock.fetcher);
+async function run(mock, from = 0, list = models) {
+  return complete([{ role: "user", content: "a report" }], tools, list, from, "[test]", mock.fetcher, 0);
 }
 
 let mock = stub(answer("Answer"), answer("unused"));
@@ -56,7 +76,7 @@ for (const [bad, description] of failures) {
   const result = await run(mock);
   assert.equal(result.msg.content, "Backup answer", description);
   assert.equal(result.model, 1, description);
-  assert.deepEqual(mock.attempted, models, description);
+  assert.deepEqual(mock.attempted, names, description);
 }
 
 // A valid tool turn is returned intact; after switching, later steps stay on the backup.
@@ -68,6 +88,33 @@ assert.deepEqual(mock.attempted, ["primary"]);
 mock = stub(answer("Backup tool result"));
 assert.equal((await run(mock, 1)).model, 1);
 assert.deepEqual(mock.attempted, ["backup"]);
+
+// Fallback wraps around: a request that moved to the last model can still continue on the first.
+mock = stub(new Error("down"), answer("wrapped"));
+const wrapped = await run(mock, 1);
+assert.equal(wrapped.msg.content, "wrapped");
+assert.equal(wrapped.model, 0);
+assert.deepEqual(mock.attempted, ["backup", "primary"]);
+
+// A failed model is skipped by the next request; when every model is cooling down, all are tried anyway.
+mock = stub(new Response("", { status: 503 }), answer("first"), answer("second"));
+await run(mock);
+assert.equal((await run(mock)).msg.content, "second");
+assert.deepEqual(mock.attempted, ["primary", "backup", "backup"]);
+mock = stub(new Error("down"), new Error("down"), answer("recovered"));
+await assert.rejects(run(mock));
+assert.equal((await run(mock)).msg.content, "recovered");
+assert.deepEqual(mock.attempted, ["primary", "backup", "primary"]);
+
+// After every model failed, rate-limited ones get one more try; other failures do not (see the HTTP 500 case below).
+mock = stub(new Response("", { status: 429 }), new Error("down"), answer("after wait"));
+assert.equal((await run(mock)).msg.content, "after wait");
+assert.deepEqual(mock.attempted, ["primary", "backup", "primary"]);
+
+// A local provider without a key gets no Authorization header (checked in the stub).
+mock = stub(answer("local"));
+assert.equal((await run(mock, 0, parsed.filter((m) => !m.key))).msg.content, "local");
+assert.deepEqual(mock.attempted, ["qwen3:32b"]);
 
 // Do not route around the provider's safety filter or repeat the same failed model.
 mock = stub(answer(null, "content_filter"), answer("should not run"));
@@ -82,6 +129,8 @@ await assert.rejects(run(mock), (e) => {
   assert.doesNotMatch(e.message, /private/);
   return true;
 });
-assert.deepEqual(mock.attempted, models);
+assert.deepEqual(mock.attempted, names);
 
-console.log(`model fallback ok: ${failures.length} failure modes, valid tool turns, sticky fallback, content filter, sanitized errors`);
+console.log(
+  `model fallback ok: provider parsing, ${failures.length} failure modes, valid tool turns, sticky + wrap-around fallback, cooldown, 429 retry, keyless local provider, content filter, sanitized errors`,
+);
