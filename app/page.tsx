@@ -342,7 +342,7 @@ export default function Home() {
       >
         <div className="flex items-center gap-2.5 px-5 pt-5 pb-4">
           <Mark className="size-6" />
-          <span className="font-serif text-xl tracking-[-0.01em]">Referral Reports</span>
+          <span className="font-serif text-xl tracking-[-0.01em]">Prompt KPI</span>
         </div>
         <div className="px-3">
           <button
@@ -411,7 +411,7 @@ export default function Home() {
       {menu && <button aria-label="Close menu" onClick={() => setMenu(false)} className="fixed inset-0 z-20 bg-ink/30 md:hidden" />}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <h1 className="sr-only">Referral Reports</h1>
+        <h1 className="sr-only">Prompt KPI</h1>
         <header className="flex items-center justify-between border-b border-line px-1 md:hidden">
           <button
             aria-label="Open menu"
@@ -421,7 +421,7 @@ export default function Home() {
           >
             <Icon name="menu" />
           </button>
-          <span className="truncate px-2 font-serif text-lg">{active?.title ?? "Referral Reports"}</span>
+          <span className="truncate px-2 font-serif text-lg">{active?.title ?? "Prompt KPI"}</span>
           <button
             aria-label="New report"
             onClick={newChat}
@@ -541,6 +541,13 @@ export default function Home() {
             </div>
           </>
         )}
+        <footer className="bg-white px-4 py-2.5 text-center text-xs text-muted">
+          Developed & maintained with{" "}
+          <span role="img" aria-label="love">
+            ❤️
+          </span>{" "}
+          by <span className="font-medium text-ink/80">SynergyWorks Solutions LLP</span>
+        </footer>
       </div>
     </div>
   );

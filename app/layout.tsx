@@ -7,7 +7,7 @@ const poppins = Poppins({ variable: "--font-poppins", subsets: ["latin"], weight
 const newsreader = Newsreader({ variable: "--font-newsreader", subsets: ["latin"], axes: ["opsz"] });
 
 export const metadata: Metadata = {
-  title: "Referral Reports",
+  title: "Prompt KPI",
   description: "AI reporting assistant for referrals, PCPs and specialists",
 };
 

@@ -1,4 +1,4 @@
-# Referral Reports (POC)
+# Prompt KPI (POC)
 
 AI agent that answers reporting questions from the `df-dev` MongoDB (referrals/appointments, PCPs, specialists, providers, users) using LLMs with tool calling, from any OpenAI-compatible provider.
 

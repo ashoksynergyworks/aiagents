@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <!-- same as Mark in app/page.tsx; lighter navy so it stays visible on dark browser tabs -->
+  <style>@media (prefers-color-scheme: dark) { .n { fill: #9aa3e0; stroke: #9aa3e0 } }</style>
+  <path class="n" d="M6 15C6 9.5 9.5 6 15 6" fill="none" stroke="#323c7a" stroke-width="2" stroke-linecap="round" />
+  <circle class="n" cx="6" cy="18" r="3" fill="#323c7a" stroke="none" />
+  <circle cx="18" cy="6" r="3" fill="#cc485f" />
+</svg>
