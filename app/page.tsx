@@ -16,6 +16,7 @@ async function checkDb(): Promise<DbStatus> {
 }
 
 const SUGGESTIONS = [
+  { label: "What needs attention", prompt: "What needs my attention this week?" },
   { label: "Monthly referrals", prompt: "How many referrals came in each month this year?" },
   { label: "Top specialist groups", prompt: "Top 10 specialist groups by referrals in the last 90 days" },
   { label: "Office report (CSV)", prompt: "CSV of appointments created with each specialist office last month" },
@@ -81,6 +82,7 @@ function Reply({ text }: { text: string }) {
   for (const line of text.replaceAll("**", "").split("\n")) {
     const t = line.trim();
     const last = blocks.at(-1);
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) continue; // markdown dividers, which models add despite the prompt
     if (t.startsWith("|")) {
       if (/^[|\s:-]+$/.test(t) && t.includes("---")) continue; // header separator row
       const cells = t.replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
@@ -235,7 +237,7 @@ export default function Home() {
             send(input);
           }
         }}
-        placeholder="Ask for a report, e.g. referrals per specialist group last month"
+        placeholder="Ask for a report, e.g. referrals per specialist group last month. Please don't type patient names."
         className="block max-h-60 min-h-14 w-full resize-none bg-transparent px-4 pt-4 text-base outline-none field-sizing-content placeholder:text-muted"
       />
       <div className="flex justify-end px-2.5 pb-2.5">

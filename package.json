@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "seed": "node --env-file=.env scripts/seed.mjs",
-    "test": "node --experimental-strip-types --no-warnings scripts/check-guard.mjs && node --experimental-strip-types --no-warnings scripts/check-model.mjs"
+    "test": "node --experimental-strip-types --no-warnings scripts/check-guard.mjs && node --experimental-strip-types --no-warnings scripts/check-kpis.mjs && node --experimental-strip-types --no-warnings scripts/check-model.mjs",
+    "test:phi": "node --env-file=.env --experimental-strip-types --no-warnings scripts/check-phi.mjs"
   },
   "dependencies": {
     "mongodb": "^7.7.0",

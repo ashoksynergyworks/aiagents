@@ -14,22 +14,37 @@ const blocked = [
   [{ $lookup: { from: { db: "admin", coll: "system.users" }, as: "x", pipeline: [] } }],
   [{ $unionWith: { coll: "loginlogs" } }],
   [{ $unionWith: "loginlogs" }], // string shorthand
-  [{ $project: { x: "$password" } }],
+  [{ $facet: { a: [{ $lookup: { from: "patients", localField: "patientId", foreignField: "_id", as: "p" } }] } }], // nested
+  [{ $graphLookup: { from: "appointments", startWith: "$_id", connectFromField: "_id", connectToField: "linkedAppointmentId", as: "x" } }],
   { $match: {} }, // not an array
 ];
-for (const p of blocked) assert.throws(() => parsePipeline(p), `should block ${JSON.stringify(p)}`);
+for (const p of blocked) assert.throws(() => parsePipeline("appointments", p), `should block ${JSON.stringify(p)}`);
 
 const allowed = [
   [{ $match: { "address.city": { $regex: "^miami$", $options: "i" } } }, { $group: { _id: "$isDeleted", n: { $sum: 1 } } }],
   [{ $lookup: { from: "pcps", localField: "pcpId", foreignField: "_id", as: "p" } }, { $unionWith: "specialists" }],
   '[{"$match":{"_id":{"$oid":"63c547fda93be66ff86f86b8"},"createdAt":{"$gte":{"$date":"2026-01-01T00:00:00Z"}}}}]',
   [{ $match: { isTempPassword: true, bByPassOTP: false } }],
+  [{ $lookup: { from: "defaultappointmenttypes", localField: "appointmentTypeId", foreignField: "_id", as: "t" } }, { $lookup: { from: "specialties", localField: "specialty", foreignField: "_id", as: "s" } }],
 ];
-for (const p of allowed) assert.doesNotThrow(() => parsePipeline(p), `should allow ${JSON.stringify(p)}`);
+for (const p of allowed) assert.doesNotThrow(() => parsePipeline("appointments", p), `should allow ${JSON.stringify(p)}`);
 
-const [stage] = parsePipeline(allowed[2]);
+const stage = parsePipeline("appointments", allowed[2]).at(-1);
 assert.equal(stage.$match._id.constructor.name, "ObjectId");
 assert.ok(stage.$match.createdAt.$gte instanceof Date);
+
+// Patient data: every source gets its scope before any model stage, at any depth (facet → lookup → unionWith)
+const scoped = parsePipeline("appointments", [
+  { $facet: { a: [{ $lookup: { from: "users", localField: "createdBy", foreignField: "_id", as: "u", pipeline: [{ $unionWith: "appointments" }] } }] } },
+]);
+const appts = scoped[0];
+for (const f of ["patientAddress", "appointmentComments", "appointmentNotes", "reasonToCancel", "referralAttachments", "policyNumber"]) assert.ok(!(f in appts.$project), f);
+assert.ok(appts.$project.patientId && appts.$project.cancelReason);
+const lookup = scoped[1].$facet.a[0].$lookup.pipeline;
+assert.deepEqual(lookup[0], { $match: { patient_ref_id: null, role: { $ne: "patient" } } });
+for (const f of ["email", "contact", "dob", "address", "patient_ref_id"]) assert.ok(!(f in lookup[1].$project), f);
+assert.deepEqual(lookup[2].$unionWith.pipeline[0], appts);
+assert.equal(parsePipeline("pcps", [{ $match: {} }]).length, 1); // org data passes unscoped
 
 const csv = toCsv([
   { Office: 'Smith, "Main" Clinic', Count: -3, password: "hash", Note: "=HYPERLINK(1)", Id: new BSON.ObjectId("63c547fda93be66ff86f86b8") },

@@ -1,6 +1,6 @@
 // OpenAI-compatible endpoints can return HTTP 200 with an unusable completion.
 // Validate the whole turn before executing any tool call so a bad primary response can fall back.
-export const TOOL_NAMES = ["aggregate", "export_csv"] as const;
+export const TOOL_NAMES = ["aggregate", "export_csv", "kpis"] as const;
 type ToolName = (typeof TOOL_NAMES)[number];
 const MAX_TOOL_CALLS = 8; // avoid an unbounded number of database queries in one step
 
@@ -8,11 +8,12 @@ const MAX_TOOL_CALLS = 8; // avoid an unbounded number of database queries in on
 // LLM_MODELS is an ordered "<provider>:<model>,…" list. A provider needs <PROVIDER>_BASE_URL (built in below) and
 // <PROVIDER>_API_KEY, except one given its own base URL, which may run without auth (a local server).
 const BASE_URLS: Record<string, string> = { nvidia: "https://integrate.api.nvidia.com/v1", openrouter: "https://openrouter.ai/api/v1" };
-// The first four made valid tool calls on 2026-10-26 (many catalog models 404 per account or time out on the free tier).
+// The NVIDIA models made valid tool calls on 2026-10-26 (many catalog models 404 per account or time out on the free tier).
 // NVIDIA leads: its free tier allows ~40 req/min vs OpenRouter's 50 req/day. OpenRouter sits third so an
-// NVIDIA-wide outage costs two attempts. openrouter/free picks any free model your OpenRouter privacy settings allow.
+// NVIDIA-wide outage costs two attempts. openrouter/free was dropped on 2026-10-29: it routes to a random free model,
+// and in QA those worked out rates in their heads instead of using the query results.
 export const DEFAULT_MODELS =
-  "nvidia:nvidia/nemotron-3-ultra-550b-a55b,nvidia:minimaxai/minimax-m3.1-flash,openrouter:openrouter/free,nvidia:nvidia/nemotron-3.5-lightning-30b-a3b,nvidia:nvidia/nemotron-3.5-super-vl-120b-a12b,openrouter:google/gemma-4-31b-it:free";
+  "nvidia:nvidia/nemotron-3-ultra-550b-a55b,nvidia:minimaxai/minimax-m3.1-flash,openrouter:google/gemma-4-31b-it:free,nvidia:nvidia/nemotron-3.5-lightning-30b-a3b,nvidia:nvidia/nemotron-3.5-super-vl-120b-a12b";
 
 export type Model = { id: string; name: string; url: string; key?: string; timeout: number };
 
@@ -77,7 +78,8 @@ function parseCompletion(body: unknown): { msg: ModelMessage; finish: unknown; u
       if (!call || typeof call.id !== "string" || !call.id.trim() || ids.has(call.id) || (call.type != null && call.type !== "function"))
         throw new InvalidCompletion("invalid tool call id or type");
       ids.add(call.id);
-      if (fn?.name !== TOOL_NAMES[0] && fn?.name !== TOOL_NAMES[1]) throw new InvalidCompletion("unknown tool name");
+      if (!fn || !TOOL_NAMES.includes(fn.name as ToolName)) throw new InvalidCompletion("unknown tool name");
+      const name = fn.name as ToolName;
       if (typeof fn.arguments !== "string") throw new InvalidCompletion("invalid tool arguments");
       let args: unknown;
       try {
@@ -86,11 +88,14 @@ function parseCompletion(body: unknown): { msg: ModelMessage; finish: unknown; u
         throw new InvalidCompletion("invalid tool arguments JSON");
       }
       const parsed = record(args);
-      if (!parsed || typeof parsed.collection !== "string" || !parsed.collection.trim() ||
-          !(Array.isArray(parsed.pipeline) || typeof parsed.pipeline === "string") ||
-          (fn.name === TOOL_NAMES[1] && (typeof parsed.filename !== "string" || !parsed.filename.trim())))
-        throw new InvalidCompletion("missing or invalid tool arguments");
-      return { id: call.id, type: "function", function: { name: fn.name, arguments: fn.arguments } };
+      // kpis checks its own dates and options (kpis.ts) and returns errors to the model like a query error
+      const valid = name === TOOL_NAMES[2]
+        ? typeof parsed?.from === "string" && typeof parsed.to === "string"
+        : !!parsed && typeof parsed.collection === "string" && !!parsed.collection.trim() &&
+          (Array.isArray(parsed.pipeline) || typeof parsed.pipeline === "string") &&
+          (name !== TOOL_NAMES[1] || (typeof parsed.filename === "string" && !!parsed.filename.trim()));
+      if (!valid) throw new InvalidCompletion("missing or invalid tool arguments");
+      return { id: call.id, type: "function", function: { name, arguments: fn.arguments } };
     });
   }
   if (choice.finish_reason === "tool_calls" && !tool_calls?.length) throw new InvalidCompletion("missing tool calls");

@@ -14,7 +14,7 @@ assert.deepEqual(
   ],
 );
 assert.deepEqual(parseModels("openrouter:a", {}), [], "hosted provider without a key is skipped");
-assert.equal(parseModels(DEFAULT_MODELS, { NVIDIA_API_KEY: "k", OPENROUTER_API_KEY: "k" }).length, 6);
+assert.equal(parseModels(DEFAULT_MODELS, { NVIDIA_API_KEY: "k", OPENROUTER_API_KEY: "k" }).length, 5);
 
 const models = parseModels("nvidia:primary,openrouter:backup", env);
 const names = models.map((m) => m.name);
