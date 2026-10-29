@@ -35,7 +35,7 @@ assert.equal(a.id, "a");
 assert.equal(a["Share of requests %"], 66.7); // 100 of 150
 assert.equal(a["No-show %"], 30);
 assert.equal(r.median["No-show %"], 5); // median of 30, 5, 0
-assert.equal(a.Flags, "Cancellation high; Acted-on low; Median days to first action slow; No-show above median; Scheduling below median");
+assert.equal(a.Flags, "Cancellation high; Acted-on low; Typical days to respond slow; No-shows above the typical office; Scheduling below the typical office");
 assert.equal(r.rows[1].Flags, "ok");
 assert.equal(r.rows[3].Flags, "fewer than 20 referrals"); // 100% cancelled, but too few to flag
 assert.equal(r.rows[4].Requests, 0); // stopped referring: still listed, with the previous count

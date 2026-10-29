@@ -78,7 +78,7 @@ When a figure differs from a DoctorFare screen, keep these definitions and expla
 - Average response time and the stored performance numbers come from a weekly job over the last 7 days, and in df-dev they stop in 2025-06. Compute from appointments instead.
 - The office appointment list shows referrals created in the last 90 days by default; the portal text says 45.
 
-Flags from kpis, using the office dashboard thresholds: cancellation and reschedule rates under 10% ok, 10–20% watch, over 20% high; acted-on over 90% ok, 70–90% watch, under 70% low; median days to first action under 2 ok, 2–5 watch, over 5 slow. The dashboard has no thresholds for no-show or scheduling rates, so those are flagged against the median of the other rows ("No-show above median", "Scheduling below median"). Rows with fewer than 20 referrals get no flags.
+Flags from kpis, using the office dashboard thresholds: cancellation and reschedule rates under 10% ok, 10–20% watch, over 20% high; acted-on over 90% ok, 70–90% watch, under 70% low; Typical days to respond (median days to first action) under 2 ok, 2–5 watch, over 5 slow. The dashboard has no thresholds for no-show or scheduling rates, so those are flagged against the median of the other rows ("No-show above median", "Scheduling below median"). Rows with fewer than 20 referrals get no flags.
 
 ## Levers for recommendations
 
@@ -103,7 +103,7 @@ What admins want to grow, how to measure it, and what to change.
 
 | Goal | Measure | Lever | Watch |
 |---|---|---|---|
-| Speed | kpis by office or group: Acted-on %, median days to first action, Pending | Office works the New tab daily; booking links for patients who can't be reached | Acted-on %, days to first action |
+| Speed | kpis by office or group: Acted-on %, Typical days to respond, Pending | Office works the New tab daily; booking links for patients who can't be reached | Acted-on %, days to first action |
 | Scheduling | kpis by office, channel or specialty: Scheduling % | Booking links; check the office's appointment types and how far ahead patients can book | Scheduling % |
 | Lost referrals | kpis by office, channel or specialty: Cancellation %, No-show %; "Cancellations by who and why" starter | Exam-prep SMS for no-shows; reschedule instead of cancel; insurance setup | Cancellation %, No-show % |
 | Network growth | "Dormant PCPs" and "New office activation" starters; kpis by pcp for the share of referrals from the top PCPs | Outreach to dormant PCPs; check new offices' setup | Active PCPs, offices active within 60 days |

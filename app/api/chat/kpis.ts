@@ -66,14 +66,14 @@ type Counts = { requests: number; pending: number; actedOn: number; confirmed: n
 const ZERO: Counts = { requests: 0, pending: 0, actedOn: 0, confirmed: 0, completed: 0, cancelled: 0, rescheduled: 0, noShows: 0, daysToAction: null };
 const r1 = (n: number | null) => (n == null ? null : Math.round(n * 10) / 10);
 const pct = (n: number, d: number) => (d ? r1((n / d) * 100) : null);
-const RATES = ["Acted-on %", "Scheduling %", "Cancellation %", "Reschedule %", "No-show %", "Median days to first action"] as const;
+const RATES = ["Acted-on %", "Scheduling %", "Cancellation %", "Reschedule %", "No-show %", "Typical days to respond"] as const;
 type Rate = (typeof RATES)[number];
 
 function metrics(c: Counts) {
   return {
     Requests: c.requests, Pending: c.pending, "Acted on": c.actedOn, Confirmed: c.confirmed, Completed: c.completed, Cancelled: c.cancelled, Rescheduled: c.rescheduled, "No-shows": c.noShows,
     "Acted-on %": pct(c.actedOn, c.requests), "Scheduling %": pct(c.confirmed, c.requests), "Cancellation %": pct(c.cancelled, c.requests),
-    "Reschedule %": pct(c.rescheduled, c.requests), "No-show %": pct(c.noShows, c.requests), "Median days to first action": r1(c.daysToAction),
+    "Reschedule %": pct(c.rescheduled, c.requests), "No-show %": pct(c.noShows, c.requests), "Typical days to respond": r1(c.daysToAction),
   };
 }
 type Metrics = ReturnType<typeof metrics>;
@@ -88,10 +88,10 @@ function flags(m: Metrics, median: Partial<Record<Rate, number | null>>) {
   band("Cancellation %", (x) => (x > 20 ? "high" : x >= 10 ? "watch" : null));
   band("Reschedule %", (x) => (x > 20 ? "high" : x >= 10 ? "watch" : null));
   band("Acted-on %", (x) => (x < 70 ? "low" : x <= 90 ? "watch" : null));
-  band("Median days to first action", (x) => (x > 5 ? "slow" : x >= 2 ? "watch" : null));
+  band("Typical days to respond", (x) => (x > 5 ? "slow" : x >= 2 ? "watch" : null));
   const md = (k: Rate) => median[k];
-  if (v("No-show %") != null && md("No-show %") != null && v("No-show %")! - md("No-show %")! >= 5) out.push("No-show above median");
-  if (v("Scheduling %") != null && md("Scheduling %") != null && md("Scheduling %")! - v("Scheduling %")! >= 10) out.push("Scheduling below median");
+  if (v("No-show %") != null && md("No-show %") != null && v("No-show %")! - md("No-show %")! >= 5) out.push("No-shows above the typical office");
+  if (v("Scheduling %") != null && md("Scheduling %") != null && md("Scheduling %")! - v("Scheduling %")! >= 10) out.push("Scheduling below the typical office");
   return out.join("; ") || "ok";
 }
 
@@ -185,7 +185,7 @@ export function kpiReport(out: Document, o: Opts) {
     period: `${o.from} to ${o.to}`,
     comparedWith: o.prev ? `${o.prev.from} to ${o.prev.to}` : null,
     by: o.by,
-    definitions: `Cohort counts: the current status of referrals created in the period (New York dates); test data excluded. Rates are % of Requests; "change" is percentage points (days for days to first action). Days to first action covers referrals the office received, not bookings its own staff created. Flags use the office dashboard thresholds and need ${o.min}+ referrals; the median is over rows with ${o.min}+ referrals.${o.by === "group" ? " Offices in two groups count in both." : o.by === "specialty" ? " Doctors with two specialties count in both." : ""}`,
+    definitions: `Each referral sent in the period, counted by where it stands today (New York dates); test bookings left out. Rates are % of Requests; "change" is the gap between the two percentages, so write both (e.g. "from 42% to 83%"), in days for days to first action. Days to first action covers referrals the office received, not bookings its own staff created. Flags use the office dashboard thresholds and need ${o.min}+ referrals; the median is over rows with ${o.min}+ referrals.${o.by === "group" ? " Offices in two groups count in both." : o.by === "specialty" ? " Doctors with two specialties count in both." : ""}`,
     total: row("All referrals", null, metrics(cur), o.prev ? metrics(totalPrev ?? ZERO) : null, cur.requests >= o.min),
     ...(o.by !== "none" && {
       median: med,

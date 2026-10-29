@@ -1,7 +1,8 @@
 @import "tailwindcss";
 
 @theme inline {
-  --font-sans: var(--font-figtree);
+  /* Poppins for UI and answers; Newsreader only for the wordmark and the empty-state heading */
+  --font-sans: var(--font-poppins);
   --font-serif: var(--font-newsreader);
 }
 

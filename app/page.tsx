@@ -85,18 +85,26 @@ function download(f: CsvFile) {
   setTimeout(() => URL.revokeObjectURL(url));
 }
 
-// ponytail: only markdown pipe tables are parsed, the rest stays plain text; add react-markdown if replies need more
+// **key figure** → <strong>. Leftover markers touching a word (a pair still open mid-stream, *italics* the prompt
+// forbids) are dropped; a "* " bullet is kept.
+function bold(s: string) {
+  return s
+    .split(/\*\*(.+?)\*\*/g)
+    .map((part, i) => (i % 2 ? <strong key={i} className="font-semibold">{part}</strong> : part.replace(/(?<=\S)\*+|\*+(?=\S)/g, "")));
+}
+
+// ponytail: only markdown pipe tables and **bold** are parsed, the rest stays plain text; add react-markdown if replies need more
 // ponytail: memo only; batch deltas per animation frame if long chats still stutter while streaming
 const Reply = memo(function Reply({ text, streaming = false }: { text: string; streaming?: boolean }) {
   const blocks: (string | string[][] | { label: string })[] = [];
-  // ponytail: models add **bold** despite the prompt; drop the markers rather than parse markdown
-  for (const line of text.replaceAll("**", "").split("\n")) {
+  for (const line of text.split("\n")) {
     const t = line.trim();
     const last = blocks.at(-1);
     if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) continue; // markdown dividers, which models add despite the prompt
     if (t.startsWith("|")) {
       if (/^[|\s:-]+$/.test(t) && t.includes("---")) continue; // header separator row
-      const cells = t.replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+      // tables carry their own emphasis (header, alignment), so bold markers are dropped in cells
+      const cells = t.replace(/^\||\|$/g, "").split("|").map((c) => c.replaceAll("**", "").trim());
       if (Array.isArray(last)) last.push(cells);
       else blocks.push([cells]);
     } else if (LABEL.test(t)) {
@@ -107,7 +115,7 @@ const Reply = memo(function Reply({ text, streaming = false }: { text: string; s
     else blocks.push(line);
   }
   return blocks.map((b, i) => {
-    if (typeof b === "string") return b.trim() && <p key={i} className="whitespace-pre-wrap">{b.trim()}</p>;
+    if (typeof b === "string") return b.trim() && <p key={i} className="whitespace-pre-wrap">{bold(b.trim())}</p>;
     if (!Array.isArray(b))
       return (
         <h3 key={i} className="pt-3 font-sans text-sm font-medium text-muted">
@@ -439,7 +447,7 @@ export default function Home() {
                   ) : (
                     // aria-busy: screen readers read the answer once it is complete, not token by token
                     <article key={i} aria-busy={m.streaming || undefined} className="animate-rise motion-reduce:animate-none">
-                      <div className="space-y-3 font-serif text-[1.0625rem] leading-7">
+                      <div className="space-y-3 text-base leading-7">
                         <Reply text={m.content} streaming={m.streaming} />
                       </div>
                       {!m.streaming && (
@@ -465,7 +473,7 @@ export default function Home() {
                         ))}
                         <div className="mt-2 flex items-center gap-2 text-xs text-muted">
                           <button
-                            onClick={() => copy(i, m.content)}
+                            onClick={() => copy(i, m.content.replaceAll("**", ""))}
                             aria-label={copied === i ? "Copied" : "Copy reply"}
                             className="-ml-2 grid size-9 cursor-pointer place-items-center rounded-lg transition-colors duration-150 hover:bg-sidebar hover:text-ink focus-visible:outline-3 focus-visible:outline-primary"
                           >
