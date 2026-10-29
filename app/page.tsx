@@ -93,6 +93,17 @@ function bold(s: string) {
     .map((part, i) => (i % 2 ? <strong key={i} className="font-semibold">{part}</strong> : part.replace(/(?<=\S)\*+|\*+(?=\S)/g, "")));
 }
 
+// three dots pulsing in turn where the next words will land
+function Typing() {
+  return (
+    <span aria-hidden="true" className="ml-1.5 inline-flex gap-1 align-middle">
+      {[0, 1, 2].map((k) => (
+        <span key={k} style={{ animationDelay: `${k * 160}ms` }} className="size-1.5 animate-typing rounded-full bg-primary/30 motion-reduce:animate-none" />
+      ))}
+    </span>
+  );
+}
+
 // ponytail: only markdown pipe tables and **bold** are parsed, the rest stays plain text; add react-markdown if replies need more
 // ponytail: memo only; batch deltas per animation frame if long chats still stutter while streaming
 const Reply = memo(function Reply({ text, streaming = false }: { text: string; streaming?: boolean }) {
@@ -114,8 +125,18 @@ const Reply = memo(function Reply({ text, streaming = false }: { text: string; s
     } else if (typeof last === "string") blocks[blocks.length - 1] = `${last}\n${line}`;
     else blocks.push(line);
   }
-  return blocks.map((b, i) => {
-    if (typeof b === "string") return b.trim() && <p key={i} className="whitespace-pre-wrap">{bold(b.trim())}</p>;
+  const end = blocks.at(-1);
+  const inline = streaming && typeof end === "string" && !!end.trim(); // dots follow the last word, else get their own line
+  const out = blocks.map((b, i) => {
+    if (typeof b === "string")
+      return (
+        b.trim() && (
+          <p key={i} className="whitespace-pre-wrap">
+            {bold(b.trim())}
+            {inline && i === blocks.length - 1 && <Typing />}
+          </p>
+        )
+      );
     if (!Array.isArray(b))
       return (
         <h3 key={i} className="pt-3 font-sans text-sm font-medium text-muted">
@@ -152,6 +173,7 @@ const Reply = memo(function Reply({ text, streaming = false }: { text: string; s
       </div>
     );
   });
+  return streaming && !inline ? [...out, <p key="typing"><Typing /></p>] : out;
 });
 
 export default function Home() {
@@ -497,16 +519,18 @@ export default function Home() {
                     </article>
                   ),
                 )}
-                {busy && (
-                  <p role="status" className="flex items-center gap-3 text-sm text-muted">
-                    <Mark running className="size-7" />
-                    {messages.at(-1)?.streaming ? (
-                      <span className="sr-only">Writing the report</span>
-                    ) : (
-                      `${status || "Running queries"}. Reports can take up to a minute.`
-                    )}
-                  </p>
-                )}
+                {busy &&
+                  (messages.at(-1)?.streaming ? (
+                    // the typing dots in the answer show progress now
+                    <p role="status" className="sr-only">
+                      Writing the report
+                    </p>
+                  ) : (
+                    <p role="status" className="flex items-center gap-3 text-sm text-muted">
+                      <Mark running className="size-7" />
+                      {`${status || "Running queries"}. Reports can take up to a minute.`}
+                    </p>
+                  ))}
                 <div ref={endRef} />
               </div>
             </main>

@@ -54,9 +54,9 @@ const KEYS: Record<By, [Document[], [string, string]?]> = {
   channel: [[
     { $lookup: { from: "defaultappointmenttypes", localField: "appointmentTypeId", foreignField: "_id", pipeline: [{ $project: { appointmentType: 1 } }], as: "t" } },
     { $set: { label: { $ifNull: [{ $first: "$t.appointmentType" }, "$appointmentType"] } } },
+    // no eFax branch: eFaxLeadId[] lists faxes sent out for the referral, and referrals created from an eFax lead carry no marker
     { $set: { key: { $switch: { branches: [
       { case: { $eq: ["$isUploadedFromCSV", true] }, then: "CSV import" },
-      { case: { $gt: [{ $size: { $ifNull: ["$eFaxLeadId", []] } }, 0] }, then: "eFax lead" },
       { case: { $or: [{ $eq: ["$isPatientSubmittedAppointment", true] }, has("$createdByPatient")] }, then: { $concat: ["Patient self-booked: ", "$label"] } },
     ], default: "$label" } } } },
   ]],

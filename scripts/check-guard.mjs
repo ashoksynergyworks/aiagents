@@ -12,13 +12,15 @@ const blocked = [
   [{ $group: { _id: null, x: { $accumulator: {} } } }],
   [{ $lookup: { from: "patients", localField: "patientId", foreignField: "_id", as: "p" } }],
   [{ $lookup: { from: { db: "admin", coll: "system.users" }, as: "x", pipeline: [] } }],
-  [{ $unionWith: { coll: "loginlogs" } }],
-  [{ $unionWith: "loginlogs" }], // string shorthand
+  [{ $unionWith: { coll: "messages" } }],
+  [{ $unionWith: "chatrooms" }], // string shorthand
   [{ $facet: { a: [{ $lookup: { from: "patients", localField: "patientId", foreignField: "_id", as: "p" } }] } }], // nested
   [{ $graphLookup: { from: "appointments", startWith: "$_id", connectFromField: "_id", connectToField: "linkedAppointmentId", as: "x" } }],
   { $match: {} }, // not an array
 ];
 for (const p of blocked) assert.throws(() => parsePipeline("appointments", p), `should block ${JSON.stringify(p)}`);
+// a missing brace comes back with the text around it, so the model can fix it
+assert.throws(() => parsePipeline("appointments", '[{"$group": {"_id": "$x", "n": {"$sum": 1}}, {"$match": {}}]'), /near ".*\{"\$sum": 1\}\}, \{.*every \{ and \[/);
 
 const allowed = [
   [{ $match: { "address.city": { $regex: "^miami$", $options: "i" } } }, { $group: { _id: "$isDeleted", n: { $sum: 1 } } }],
@@ -45,6 +47,7 @@ assert.deepEqual(lookup[0], { $match: { patient_ref_id: null, role: { $ne: "pati
 for (const f of ["email", "contact", "dob", "address", "patient_ref_id"]) assert.ok(!(f in lookup[1].$project), f);
 assert.deepEqual(lookup[2].$unionWith.pipeline[0], appts);
 assert.equal(parsePipeline("pcps", [{ $match: {} }]).length, 1); // org data passes unscoped
+assert.deepEqual(parsePipeline("loginlogs", [])[0], { $match: { role: { $nin: [null, "patient"] } } }); // patient logins have no role
 
 const csv = toCsv([
   { Office: 'Smith, "Main" Clinic', Count: -3, password: "hash", Note: "=HYPERLINK(1)", Id: new BSON.ObjectId("63c547fda93be66ff86f86b8") },

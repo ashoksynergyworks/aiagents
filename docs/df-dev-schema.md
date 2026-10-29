@@ -2,7 +2,7 @@
 
 MongoDB database `df-dev` (local Docker, `mongodb://localhost:27017/df-dev`). It backs a **referral platform**: a primary care office (PCP) refers a patient to a specialist office, which assigns a provider (the doctor) and schedules the visit. Each referral is an `appointments` document.
 
-This file covers the 9 collections the AI agent reads. **The agent loads this whole file as its system prompt** (`app/api/chat/route.ts`), so a field missing here is a field it can't find. Counts, field coverage and enum values come from a full scan on 2026-10-09. Coverage % = share of documents that have the field.
+This file covers the 19 collections the AI agent reads. **The agent loads this whole file as its system prompt** (`app/api/chat/route.ts`), so a field missing here is a field it can't find. Counts, field coverage and enum values come from a full scan on 2026-10-09. Coverage % = share of documents that have the field.
 
 ## How the collections connect
 
@@ -27,6 +27,14 @@ specialists ── providersInSpecialist[] ──▶ providers
 providers   ── specialistId[] ──▶ specialists,  specialty[] ──▶ specialties
 
 users (staff logins) ── pcpId / pcpGroupId / specialistId / specialistGroupId ──▶ the org they work for
+loginlogs ── userId ──▶ users                       (login attempts; the org comes from the user)
+
+efaxleads ── specialistId / specialistGroupId ──▶ receiving office or group
+          ── appointmentId ──▶ appointments._id,  status ──▶ efaxstatuses,  tag ──▶ efaxcategories
+bookappointmentsms, examprepsms, requesteddocuments ── specialistId / specialistGroupId ──▶ office or group (no referral link)
+examprepsms ── examTypes[] ──▶ examtypes
+appointmentfeedbacks ── appointmentId (A… code) ──▶ appointments.appointmentId;  specialistId, providerId, pcpId
+patientanalytics ── specialistGroupId ──▶ specialistgroups,  specialistGroupUserId ──▶ users
 ```
 
 Reference integrity: every `appointments.pcpId`, `specialistId`, `specialistGroupId`, `providerId` resolves (100%). 4 of 2,503 `patientId`s are orphans. 80% of `appointments.createdBy` resolve to users.
@@ -38,7 +46,7 @@ Reference integrity: every `appointments.pcpId`, `specialistId`, `specialistGrou
 - **Soft delete:** org and user collections have `isDeleted` and `isBlocked`. Exclude deleted rows unless asked: `{"isDeleted": false}`.
 - **Org names live in different fields:** `pcps.pcpName`, `pcpgroups.pcpGroupName`, `specialists.specialistName`, `specialistgroups.specialistGroupName`, `providers.fullName`, `users.fullName`. Each org also has `entityName` (legal/display entity).
 - Every collection has `createdAt`, `updatedAt`, `createdBy`, `updatedBy` (→ users), and `__v`. Every org has `address[]` with `{address, city, state, zipCode, country, timeZone, locationLongLat (GeoJSON Point, 2dsphere-indexed)}`, plus `profilePic` and `profileLogo`. These are omitted from the tables below.
-- **Patient data is hidden by the server** before your pipeline runs, also inside `$lookup` and `$unionWith`: patient names, contact details, addresses, notes, comments, documents, insurance numbers and patient logins. For `appointments` and `users`, only the fields listed below exist. Refer to a patient by `patientId`.
+- **Patient data is hidden by the server** before your pipeline runs, also inside `$lookup` and `$unionWith`: patient names, contact details, addresses, notes, comments, documents, insurance numbers, text messages and patient logins. In every collection below except the org and catalog ones, only the fields listed exist. Refer to a patient by `patientId`.
 
 ## Metric definitions (use in every report)
 
@@ -88,7 +96,12 @@ The data shows a problem; these are the DoctorFare settings and routines that ca
 |---|---|
 | High no-show rate at an office | Turn on appointment instructions (exam-prep SMS) for the office (admin: `allowedFeatures` EXAM_PREPARATIONS) |
 | Pending referrals with no date, patients hard to reach (`isPatientSpokenTo` NOT_ABLE_TO_CONNECT) | Text patients a booking link (admin: `allowedFeatures` BOOK_APPOINTMENT) |
-| Low acted-on rate, old Pending backlog | Office staff work the New tab daily; check the office has staff who log in |
+| Low acted-on rate, old Pending backlog | Office staff work the New tab daily; check the office has staff who log in ("Group logins" starter) |
+| A group with pending referrals and no recent staff login | Admin calls the group; check its staff accounts can log in |
+| Failed logins or blocked accounts at an org | Admin unblocks the account or resets the password |
+| Patient chats not handled, or abandoned by the office | Office assigns chat staff during opening hours |
+| Low patient ratings at an office | Admin reviews the office's response speed and cancellations with the office manager |
+| eFax leads not turned into referrals | Office staff work new leads daily in the eFax Workflow Manager and create the referral from the lead |
 | Info requests of type REFERRAL_MISSING or WRONG_REFERRAL | Ask the referring PCP to attach the referral when booking |
 | Cancellations and reschedules the PCP never acknowledges (`handledStatus` UNHANDLED or COMMENT_UNHANDLED) | PCP staff follow up the Changes tab; email/SMS notifications for those events (admin) |
 | A PCP linked to offices sends few referrals | Account outreach; check its booking preference for those offices, Calendar or Bulk (`pcps.pcpPreference`) |
@@ -111,6 +124,10 @@ What admins want to grow, how to measure it, and what to change.
 | Backlog | "Pending by age" starter | Office clears referrals waiting over 14 days first | Pending over 14 days |
 | PCP relationship | `handledStatus`, info requests by `requestType`, doctor notes not downloaded | PCP follows up the Changes tab; referral attached at booking | Handled share, info requests per 100 referrals |
 | Specialty mix | kpis by specialty | Recruit offices where scheduling lags demand | Scheduling % by specialty |
+| Office engagement | "Group logins" starter; logins per month from loginlogs | Contact groups with pending referrals and no recent login; unblock locked accounts | Last staff login, failed logins |
+| Feature use | "Feature use" starter next to kpis by office | Exam-prep texts where no-shows are high; booking links where scheduling is low | No-show %, Scheduling % after the office starts |
+| Patient experience | "Patient ratings" and "Patient chat" starters | Chat staffing; review low-rated offices | Net promoter score, chats handled % |
+| eFax intake | "eFax" starter | Work new leads daily; create the referral from the lead | Leads linked to a referral |
 
 Attention briefing (for "what needs my attention?"). Use the last 30 days compared with the 30 days before, unless the user gives a period. If that period has no referrals, say so and use the latest full month that has data. Check:
 1. kpis by none: total referrals and rates against the previous period.
@@ -118,6 +135,7 @@ Attention briefing (for "what needs my attention?"). Use the last 30 days compar
 3. kpis by office: offices with 20+ referrals flagged high, low or slow.
 4. "Dormant PCPs" starter: PCPs that stopped referring.
 5. "Pending by age" starter: referrals waiting over 14 days.
+6. "Group logins" starter next to kpis by group: groups with pending referrals and no staff login in the last 14 days.
 Reply with an answer line, then up to 5 items as | Priority | What | Referrals affected | Recommended action | Watch |, most referrals affected first, then the Based on line, Recommendation and Follow-up questions.
 
 ---
@@ -185,7 +203,7 @@ One referral / visit. Data runs from 2024-02 to 2026-09. 951 rows were created i
 - `appointmentHistory[]` (65%): `{updatedBy → users, updatedAt, updatedEntity[{entityName}]}`; event names outside the known list read "Other". This is the audit trail, used for status-change timing. Status changes have `updatedEntity.entityName` Reviewed, DATE_ADDED, REVIEWED_AND_DATE_ADDED, workInProgress, Canceled, NoShow, Complete, or a name starting with "Rescheduled" (several variants); the entry's `updatedAt` is when it happened. Time to first office action = earliest such `updatedAt` − `createdAt` (256 appointments have a Reviewed or DATE_ADDED entry). Most other entries are comments, notes and fax events.
 - `handledHistory[]` (43%): `{handledStatus, handledBy → users, handledAt}`
 - `subStatusForRequestInfo[]` (3%): info requests. `{requestType (PATIENT_INFO|REFERRAL_MISSING|PATIENT_DENIED|WRONG_REFERRAL|OTHERS), requestStatus (OPEN|CLOSED|RESOLVED), requestedBy → users, requestedAt}`
-- `eFaxLeadId[]` → efaxleads (not readable)
+- `eFaxLeadId[]` → efaxleads: faxes sent out about this referral, not a lead it came from
 - Documents: use the flags `isReferralUploaded`, `isProviderNotesIncluded`, `isProviderNotesDownloaded` and `providerNotesUploadDate`; the files themselves are hidden.
 
 Indexed for reporting: `currentStatus+createdAt`, `specialistGroupId+createdAt`, `pcpId+createdAt+providerId`, `specialistId+appointmentDate+patientId`, `appointmentType+createdAt`, `appointmentStartDateTime`, `appointmentId`.
@@ -336,6 +354,82 @@ Specialty is not on appointments: `appointments.providerId` → `providers.speci
 
 ---
 
+## Activity data (checked on df-dev 2026-10-29)
+
+Most of these hold little data on df-dev. When a table has under about 20 rows for the period or office asked about, give the counts and say it is too few to compare.
+
+## loginlogs (9,262, 2023-05 to 2026-10): staff login attempts
+
+| Field | Type | Notes |
+|---|---|---|
+| `userId` | ObjectId → users | The org comes from the user: `users.specialistId` (office staff), `users.specialistGroupId` (group staff), `pcpId`, `pcpGroupId` |
+| `role` | string | Role at login: pcpAdmin, admin, specialistGroupAdmin, specialistAdmin, specialistManager, pcpManager, specialistGroupManager, superAdmin, pcpGroupManager, specialistMember, pcpGroupAdmin, pcpMember, … `admin` and `superAdmin` are DoctorFare staff: leave them out when measuring office use |
+| `status` | string | Success (8,082), Failure (1,180) |
+| `reason` | string | Login successfull, Incorrect Password (1,078), Account Admin Blocked (72), Account Blocked (29), Password not set, Other |
+| `loginAt` | date | |
+
+One row per attempt: count distinct `userId` for active staff. Patient logins are hidden. Never `$lookup` into loginlogs once per office, group or user: it times out. For any question about staff logins, inactive offices or groups nobody is working, run the "Group logins" starter as written and put it next to kpis by group.
+
+## efaxleads (131, 2026-01 to 2026-08): eFax work items
+
+Two kinds of rows share this collection:
+- **Fax sent for a referral** (`direction` OUTGOING, 120): a fax the platform sent about an existing referral (offices with eFax on fax the referral when it is uploaded). Outreach, not intake.
+- **Lead** (any other `direction`, 11): an incoming fax, or one staff added by hand (`faxType` MANUAL), worked in the office's eFax Workflow Manager. Staff can create a referral from a lead; `appointmentId` is then expected to be set. No lead on df-dev has one, so lead conversion can't be shown yet: say so.
+
+| Field | Type | Notes |
+|---|---|---|
+| `specialistId`, `specialistGroupId` | ObjectId | Receiving office or group; one of them is set |
+| `direction` | string | OUTGOING, INCOMING, null (manual lead) |
+| `faxType` | string | EFAX, MANUAL |
+| `appointmentId` | ObjectId → appointments._id | |
+| `status` | ObjectId → efaxstatuses | Lead status the office defined; leads only |
+| `tag` | ObjectId → efaxcategories | Work type the office defined; leads only |
+| `sentStatus` | string | Fax delivery: success, inprogress and in_progress (the same), queued |
+| `efaxDate` | date | When the fax arrived or was sent |
+| `isMarkCompleted`, `completedAt` | bool, date | Staff closed the lead |
+| `isSMSSent`, `SMSCount`, `bookAppointmentSmsCount` | bool, number | Texts sent to the patient from the lead |
+| `isForwarded`, `isDeleted` | bool | |
+
+`efaxstatuses` (26): `name`, `categoryId` → efaxcategories, `isPrimary`, `isBlocked`, `isDeleted`. `efaxcategories` (16): `name`, `specialistId`, `specialistGroupId`, `isPrimary`, `isDeleted`.
+
+## Patient texts: bookappointmentsms, examprepsms, requesteddocuments
+
+The server converts office ids here to ObjectId, so `$lookup` into specialists and specialistgroups works. Some rows only have the group: use `{"$ifNull": ["$specialistId", "$specialistGroupId"]}` as the office and look it up in both. None of them link to a referral, so compare offices that use a feature with those that don't; that shows a link, not a cause.
+
+| Collection | Rows | A row is | Fields |
+|---|---|---|---|
+| `bookappointmentsms` | 97, 2025-12 to 2026-07 | A booking link texted to a patient | `smsType` BOOK_APPOINTMENT (staff sent it) or IVR_APPOINTMENT (the phone system did), `sentBySource` USER or IVR, `sentBy` → users, `fromEFax`, `efaxLeadId` → efaxleads, `createdAt` |
+| `examprepsms` | 16, 2025-12 to 2026-06 | Exam instructions texted before a visit | `examTypes[]` → examtypes (`name`), `appointmentDate` (the exam date), `toBeDetermined` (no date yet), `sentBy`, `createdAt` |
+| `requesteddocuments` | 51, 2025-11 to 2026-07 | A text asking the patient to upload documents | `status` PENDING, SUBMITTED, REVIEWED, CANCELLED; `documentSubmittedTime` (when the patient uploaded), `followUpCount`, `followUpDate`, `sentBy`, `createdAt`. Time to submit = `documentSubmittedTime` − `createdAt` |
+
+## appointmentfeedbacks (37, 2023-06 to 2025-08): patient ratings after a visit
+
+| Field | Type | Notes |
+|---|---|---|
+| `rating` | number | 0–10 "would you recommend" score. 19 of 37 are 0, and it isn't confirmed whether 0 means "not rated": say so |
+| `type_of_provider` | string | Score band: PROMOTOR (9–10), NEUTRAL (7–8), DETRACTOR (0–6). Net promoter score = % promoters − % detractors |
+| `is_refer_to_friend` | bool | Would refer a friend |
+| `appointmentId` | string | The referral's A… code → `appointments.appointmentId` (not `_id`); 4 of 10 resolve on df-dev |
+| `specialistId`, `providerId`, `pcpId` | ObjectId | `specialistGroupId[]` is an ObjectId array |
+| `createdAt` | date | |
+| `isDeleted`, `isBlocked` | bool | |
+
+## patientanalytics (400, 2025-08 to 2026-05): patient chat sessions
+
+| Field | Type | Notes |
+|---|---|---|
+| `specialistGroupId` | ObjectId | Group the patient chatted with (`specialistId` is rarely set) |
+| `specialistGroupUserId` | ObjectId → users | Staff member who took the chat |
+| `chatHandled` | bool | Staff answered (137 of 400) |
+| `abandonendByPatient`, `abandonendBySpecialist` | bool | Left unfinished by the patient or by the office (the field names are misspelled in the data) |
+| `AverageResponseTime` | number | Staff reply time; 0 = none measured. The unit isn't confirmed (non-zero values 6–132, typically 16), so compare groups and don't quote seconds or minutes |
+| `totalMessagesCount` | number | |
+| `chatActive` | bool | |
+| `status` | string | Always "Requested" on df-dev |
+| `createdAt` | date | |
+
+---
+
 ## Report query starters
 
 Written in the agent's tool format: `aggregate(collection, pipeline)` with Extended JSON (`{"$oid"}`, `{"$date"}`).
@@ -407,17 +501,83 @@ aggregate("specialists", [
 ])
 
 // Referrals by booking channel per month: add the month to the group. For channel rates use kpis by channel. The channel is the appointment type's catalog name;
-// CSV imports, eFax leads and patient self-bookings override it, first match wins. Patient self-bookings show their route, e.g. "Patient self-booked: IVR"
+// CSV imports and patient self-bookings override it, first match wins. Patient self-bookings show their route, e.g. "Patient self-booked: IVR".
+// Referrals created from an eFax lead carry no marker, so there is no eFax channel
 aggregate("appointments", [
   { "$match": { "isDeveloperAppointment": { "$ne": true }, "currentStatus": { "$ne": "MOBILE_UNVERIFIED" } } },
   { "$lookup": { "from": "defaultappointmenttypes", "localField": "appointmentTypeId", "foreignField": "_id", "pipeline": [{ "$project": { "_id": 0, "appointmentType": 1 } }], "as": "t" } },
   { "$set": { "label": { "$ifNull": [{ "$first": "$t.appointmentType" }, "$appointmentType"] } } },
   { "$group": { "_id": { "$switch": { "branches": [
     { "case": { "$eq": ["$isUploadedFromCSV", true] }, "then": "CSV import" },
-    { "case": { "$gt": [{ "$size": { "$ifNull": ["$eFaxLeadId", []] } }, 0] }, "then": "eFax lead" },
     { "case": { "$or": [{ "$eq": ["$isPatientSubmittedAppointment", true] }, { "$ne": [{ "$ifNull": ["$createdByPatient", null] }, null] }] }, "then": { "$concat": ["Patient self-booked: ", "$label"] } }
   ], "default": "$label" } }, "Referrals": { "$sum": 1 } } },
   { "$sort": { "Referrals": -1 } },
   { "$project": { "_id": 0, "Channel": "$_id", "Referrals": 1 } }
+])
+
+// Group logins: last successful login by each specialist group's staff (group staff, or staff of an office in the group), oldest first.
+// Run it as is, then match by name with kpis by group (Pending). A group with pending referrals that is missing here has no login recorded
+aggregate("loginlogs", [
+  { "$match": { "status": "Success", "role": { "$regex": "^specialist" } } },
+  { "$group": { "_id": "$userId", "last": { "$max": "$loginAt" } } },
+  { "$lookup": { "from": "users", "localField": "_id", "foreignField": "_id", "pipeline": [{ "$project": { "specialistId": 1, "specialistGroupId": 1 } }], "as": "u" } },
+  { "$unwind": "$u" },
+  { "$lookup": { "from": "specialists", "localField": "u.specialistId", "foreignField": "_id", "pipeline": [{ "$project": { "specialistGroupId": 1 } }], "as": "s" } },
+  { "$set": { "groups": { "$ifNull": [{ "$first": "$s.specialistGroupId" }, ["$u.specialistGroupId"]] } } },
+  { "$unwind": "$groups" },
+  { "$group": { "_id": "$groups", "last": { "$max": "$last" } } },
+  { "$lookup": { "from": "specialistgroups", "localField": "_id", "foreignField": "_id", "pipeline": [{ "$project": { "specialistGroupName": 1 } }], "as": "g" } },
+  { "$project": { "_id": 0, "Group": { "$ifNull": [{ "$first": "$g.specialistGroupName" }, "Not recorded"] }, "Last staff login": { "$dateToString": { "format": "%Y-%m-%d", "date": "$last", "timezone": "America/New_York" } } } },
+  { "$sort": { "Last staff login": 1 } }
+])
+
+// eFax: leads vs faxes sent for a referral, per month. Only leads are intake
+aggregate("efaxleads", [
+  { "$match": { "isDeleted": false } },
+  { "$group": { "_id": { "month": { "$dateToString": { "format": "%Y-%m", "date": "$createdAt", "timezone": "America/New_York" } }, "kind": { "$cond": [{ "$eq": ["$direction", "OUTGOING"] }, "Fax sent for a referral", "Lead"] } },
+    "Count": { "$sum": 1 }, "Linked to a referral": { "$sum": { "$cond": [{ "$gt": ["$appointmentId", null] }, 1, 0] } },
+    "Marked completed": { "$sum": { "$cond": ["$isMarkCompleted", 1, 0] } }, "Fax delivered": { "$sum": { "$cond": [{ "$eq": ["$sentStatus", "success"] }, 1, 0] } } } },
+  { "$sort": { "_id.month": 1, "_id.kind": 1 } },
+  { "$project": { "_id": 0, "Month": "$_id.month", "Kind": "$_id.kind", "Count": 1, "Linked to a referral": 1, "Marked completed": 1, "Fax delivered": 1 } }
+])
+
+// Feature use per office since a date: booking links, exam-prep texts, document requests. Put it next to kpis by office (No-show %, Scheduling %)
+aggregate("bookappointmentsms", [
+  { "$match": { "isDeleted": { "$ne": true }, "createdAt": { "$gte": { "$date": "2026-01-01T00:00:00Z" } } } },
+  { "$set": { "f": "link" } },
+  { "$unionWith": { "coll": "examprepsms", "pipeline": [{ "$match": { "isDeleted": { "$ne": true }, "createdAt": { "$gte": { "$date": "2026-01-01T00:00:00Z" } } } }, { "$set": { "f": "prep" } }] } },
+  { "$unionWith": { "coll": "requesteddocuments", "pipeline": [{ "$match": { "isDeleted": { "$ne": true }, "createdAt": { "$gte": { "$date": "2026-01-01T00:00:00Z" } } } }, { "$set": { "f": "docs" } }] } },
+  { "$group": { "_id": { "$ifNull": ["$specialistId", "$specialistGroupId"] },
+    "Booking links": { "$sum": { "$cond": [{ "$eq": ["$f", "link"] }, 1, 0] } },
+    "Exam-prep texts": { "$sum": { "$cond": [{ "$eq": ["$f", "prep"] }, 1, 0] } },
+    "Document requests": { "$sum": { "$cond": [{ "$eq": ["$f", "docs"] }, 1, 0] } } } },
+  { "$lookup": { "from": "specialists", "localField": "_id", "foreignField": "_id", "pipeline": [{ "$project": { "specialistName": 1 } }], "as": "s" } },
+  { "$lookup": { "from": "specialistgroups", "localField": "_id", "foreignField": "_id", "pipeline": [{ "$project": { "specialistGroupName": 1 } }], "as": "g" } },
+  { "$project": { "_id": 0, "Office": { "$ifNull": [{ "$first": "$s.specialistName" }, { "$first": "$g.specialistGroupName" }, "Not recorded"] }, "Booking links": 1, "Exam-prep texts": 1, "Document requests": 1 } },
+  { "$sort": { "Booking links": -1 } }
+])
+
+// Patient ratings per office
+aggregate("appointmentfeedbacks", [
+  { "$match": { "isDeleted": false, "isBlocked": { "$ne": true } } },
+  { "$group": { "_id": "$specialistId", "Ratings": { "$sum": 1 }, "avg": { "$avg": "$rating" },
+    "p": { "$sum": { "$cond": [{ "$eq": ["$type_of_provider", "PROMOTOR"] }, 1, 0] } }, "d": { "$sum": { "$cond": [{ "$eq": ["$type_of_provider", "DETRACTOR"] }, 1, 0] } },
+    "Would refer a friend": { "$sum": { "$cond": ["$is_refer_to_friend", 1, 0] } } } },
+  { "$lookup": { "from": "specialists", "localField": "_id", "foreignField": "_id", "pipeline": [{ "$project": { "specialistName": 1 } }], "as": "s" } },
+  { "$project": { "_id": 0, "Office": { "$ifNull": [{ "$first": "$s.specialistName" }, "Not recorded"] }, "Ratings": 1, "Average (0-10)": { "$round": ["$avg", 1] },
+    "Net promoter score": { "$round": [{ "$multiply": [{ "$divide": [{ "$subtract": ["$p", "$d"] }, "$Ratings"] }, 100] }, 0] }, "Would refer a friend": 1 } },
+  { "$sort": { "Ratings": -1 } }
+])
+
+// Patient chat per specialist group: handled and abandoned shares, typical reply time (unit unconfirmed: compare groups only)
+aggregate("patientanalytics", [
+  { "$group": { "_id": "$specialistGroupId", "Chats": { "$sum": 1 }, "h": { "$sum": { "$cond": ["$chatHandled", 1, 0] } },
+    "a": { "$sum": { "$cond": ["$abandonendBySpecialist", 1, 0] } },
+    "rt": { "$median": { "input": { "$cond": [{ "$gt": ["$AverageResponseTime", 0] }, "$AverageResponseTime", null] }, "method": "approximate" } } } },
+  { "$lookup": { "from": "specialistgroups", "localField": "_id", "foreignField": "_id", "pipeline": [{ "$project": { "specialistGroupName": 1 } }], "as": "g" } },
+  { "$project": { "_id": 0, "Group": { "$ifNull": [{ "$first": "$g.specialistGroupName" }, "Not recorded"] }, "Chats": 1,
+    "Handled %": { "$round": [{ "$multiply": [{ "$divide": ["$h", "$Chats"] }, 100] }, 0] },
+    "Abandoned by office %": { "$round": [{ "$multiply": [{ "$divide": ["$a", "$Chats"] }, 100] }, 0] }, "Typical response time": "$rt" } },
+  { "$sort": { "Chats": -1 } }
 ])
 ```

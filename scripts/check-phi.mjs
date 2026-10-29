@@ -5,9 +5,11 @@ import { CANCEL_REASONS, parsePipeline } from "../app/api/chat/guard.ts";
 
 const client = new MongoClient(process.env.MONGODB_URI || "mongodb://localhost:27017/df-dev", { serverSelectionTimeoutMS: 8000 });
 const db = client.db("df-dev");
-const NAMES = "patientAddress|appointmentComments|appointmentNotes|reasonToCancel|referralAttachments|providerNotes|insuranceCard|policyNumber|medicalCondition|lastMetalImplantDate|bookedByIp|patientVideoLink|requestDescription|requestStatusHistory|referralPhysicianName|email|contact|dob|address|patient_ref_id|password";
+const NAMES = "patientAddress|appointmentComments|appointmentNotes|reasonToCancel|referralAttachments|providerNotes|insuranceCard|policyNumber|medicalCondition|lastMetalImplantDate|bookedByIp|patientVideoLink|requestDescription|requestStatusHistory|referralPhysicianName|email|contact|dob|address|patient_ref_id|password|patientName|mobile|callerNumber|doctorName|smsBody|faxFileUrl|internalNotes|leadHistory|sendToken|chatRoomId";
+// Hidden only in that collection (staff first names are fine in users, patientId in appointments)
+const MORE = { loginlogs: "|ip", requesteddocuments: "|firstName|lastName|notes|Notes", appointmentfeedbacks: "|patientId|message|anonymous", patientanalytics: "|patientId", bookappointmentsms: "", examprepsms: "|token", efaxleads: "" };
 // field names as keys, or as "k" values when $objectToArray turns them into data (staff named "Contact" are fine)
-const HIDDEN = new RegExp(`"(${NAMES})":|"k":"(${NAMES})"`);
+const hidden = (more = "") => new RegExp(`"(${NAMES}${more})":|"k":"(${NAMES}${more})"`);
 const FILE = /\.(pdf|png|jpe?g|docx?)\b/i;
 
 const attacks = [
@@ -19,6 +21,8 @@ const attacks = [
   ["appointments", [{ $unwind: "$appointmentHistory" }, { $replaceWith: "$appointmentHistory" }]],
   ["users", [{ $replaceWith: "$$ROOT" }]],
   ["pcps", [{ $unionWith: { coll: "users", pipeline: [{ $match: { patient_ref_id: { $ne: null } } }] } }, { $match: { pcpName: { $exists: false } } }]],
+  ["appointments", [{ $lookup: { from: "efaxleads", localField: "_id", foreignField: "appointmentId", as: "l" } }, { $unwind: "$l" }, { $replaceWith: "$l" }]],
+  ...Object.keys(MORE).flatMap((c) => [[c, [{ $replaceWith: "$$ROOT" }]], [c, [{ $project: { kv: { $objectToArray: "$$ROOT" } } }]]]),
 ];
 
 try {
@@ -33,6 +37,7 @@ try {
       continue; // the server or guard refusing a pipeline is also a pass
     }
     const s = BSON.EJSON.stringify(rows);
+    const HIDDEN = hidden(MORE[coll]);
     assert.ok(!HIDDEN.test(s), `${coll} ${JSON.stringify(p)} leaked ${s.match(HIDDEN)?.slice(1).find(Boolean)}`);
     assert.ok(!FILE.test(s), `${coll} ${JSON.stringify(p)} leaked a file name`);
     assert.ok(!patientLogins.some((id) => s.includes(id)), `${coll} ${JSON.stringify(p)} leaked a patient login`);

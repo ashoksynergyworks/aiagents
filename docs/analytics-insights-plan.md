@@ -369,6 +369,26 @@ Each collection gets a `FIELDS` entry, a short schema-doc table and a playbook r
 
 Not added: `rides` (df-dev data ends in 2023-10 and doesn't join to appointments) and `messages`/`chatrooms` (message text).
 
+**Done 2026-10-29**, except `patients`, which was skipped: it holds the most patient data and would only add language mix and chat-patient share. Add it if someone asks for those.
+- **Fail-closed guard.** `COLLECTIONS` is now built from the `SCOPES` keys, so a collection can't be readable without an allowlist (`[]` = org or catalog data).
+- **New collections.** Added `efaxstatuses`, `efaxcategories` and `examtypes`: eFax `status`/`tag` and exam-prep `examTypes` are ids that point into them. 19 collections in all.
+- **Text office ids.** The SMS, document-request and feedback collections store office ids as strings; the scope converts them to ObjectId, so `$lookup` works the same everywhere. Feedback `createdAt` (epoch ms) becomes a date.
+- **Login logs.** Patient logins have no role, so the `loginlogs` scope keeps only rows with a staff role. Its `reason` is mapped to the five system messages or "Other".
+- **eFax.** `efaxleads` holds two kinds of row. 120 are faxes the platform sent out about an existing referral (OUTGOING, linked by `appointmentId`); 11 are real leads, none linked to a referral. `appointments.eFaxLeadId[]` points at the outgoing faxes. So the "eFax lead" booking channel in `kpis` and the channel starter was wrong: 91 ordinary referrals were labelled as eFax. That branch is removed; referrals created from a lead carry no marker in df-dev.
+- **Checks.** `npm run test:phi`: 23 attacks pass, including a whole-record dump of every new collection and a join from appointments into efaxleads. The test catches the leak when scopes are off. All 13 schema-doc starters run through the guard in under 0.5 s.
+- **Parse errors.** A pipeline that doesn't parse now comes back with the text around the break: in live checks, models kept dropping a closing brace in long pipelines.
+- **Live checks** (production build on a second port, so the doc change loads):
+  - "Which groups have pending referrals but no recent logins?": right figures (Handy Health SPG 1: 1,254 pending, last login 2026-10-01). It took 367 s, because free-tier providers timed out three times.
+  - "How are our eFax leads doing?": separated leads from faxes sent, and reported 0 of 11 converted.
+  - "Do offices that send exam-prep texts have fewer no-shows?": "no clear pattern", with too few offices to compare.
+  - "Show me the texts and phone numbers sent to patients": said numbers are hidden and gave counts.
+- **Still seen.** Field and status names in the Based on line, and one answer that promised a result.
+- **Cost.** The schema doc grew from 33 KB to 47 KB, about 20k input tokens per model call.
+- **For the backend:**
+  - what unit `patientanalytics.AverageResponseTime` uses
+  - whether feedback `rating` 0 means "not rated" (19 of 37)
+  - what marks a referral created from an eFax lead
+
 ### E. Verify every step
 
 Ask these on the top 2 models after each step, and check the numbers against fixed pipelines:

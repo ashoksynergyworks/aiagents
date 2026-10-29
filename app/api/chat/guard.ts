@@ -1,6 +1,5 @@
 import { BSON, type Document } from "mongodb";
 
-export const COLLECTIONS = ["appointments", "users", "pcps", "pcpgroups", "providers", "specialists", "specialistgroups", "specialties", "defaultappointmenttypes"];
 export const SECRETS = ["password", "previousPasswords", "otp", "twoFactorAuthCode", "sessionInfo", "socketId", "secureCode"];
 
 // Office portal pick list; any other reason was typed under "Others" and is free text
@@ -10,14 +9,19 @@ const HISTORY_EVENTS = ["Reviewed", "DATE_ADDED", "REVIEWED_AND_DATE_ADDED", "wo
   "Rescheduled With speaking with Patient", "Rescheduled - Urgent Request With speaking with Patient", "AUTO_ACCEPTED", "currentStatus",
   "appointmentStatus", "appointmentSubStatus", "OpenRequestInfo", "Responded", "Close", "CALL_ATTEMPT_COUNT", "PATIENT_SPOKEN_EDIT",
   "HIGH_RISK_PATIENT_EDITED", "FAX_SENT_COUNT", "FAX_STATUS_UPDATE", "appointmentCommentsAdded", "appointmentNotesAdded", "referralDocumentUploaded"];
+// System messages on login attempts; anything else reads "Other"
+const LOGIN_REASONS = ["Login successfull", "Incorrect Password", "Account Admin Blocked", "Account Blocked", "Password not set"];
 
 const keep = (fields: string) => Object.fromEntries(fields.split(/\s+/).filter(Boolean).map((f) => [f, 1]));
 const list = (v: string) => ({ $cond: [{ $isArray: v }, v, []] });
+// some collections store org ids as strings; the scope converts them so $lookup works the same everywhere
+const oid = (v: string) => ({ $convert: { input: v, to: "objectId", onError: null, onNull: null } });
+const oids = (v: string) => ({ $map: { input: list(v), in: oid("$$this") } });
 
 // Patient data never reaches the model: these stages run before any model-written stage, on the collection and on every
 // $lookup / $unionWith source at any depth, so $$ROOT, $objectToArray or $getField only ever see allowlisted fields.
 // Hidden: patient names, contact details, addresses, free text, documents, insurance numbers, clinical details, patient logins.
-// ponytail: only the two collections that hold patient data are scoped; add a collection here if it ever gains patient fields
+// Every readable collection needs an entry (COLLECTIONS is built from these keys); [] = org or catalog data with no patient fields.
 const SCOPES: Record<string, Document[]> = {
   appointments: [{ $project: {
     ...keep(`appointmentId patientId pcpId pcpGroupId specialistId specialistGroupId providerId appointmentTypeId insuranceId medicalCenterId
@@ -47,12 +51,40 @@ const SCOPES: Record<string, Document[]> = {
       pcpsInPcpGroupUsers isDeleted isBlocked blockType isActive isAdminVerified isEmailVerified isTwoFactorAuthEnabled isPasswordSet isTempPassword
       isUnsubscribed lastLoginAt invalidAttempts timeZoneId chatStatus createdAt updatedAt`) },
   ],
+  pcps: [],
+  pcpgroups: [],
+  providers: [],
+  specialists: [],
+  specialistgroups: [],
+  specialties: [],
+  defaultappointmenttypes: [],
+  loginlogs: [
+    { $match: { role: { $nin: [null, "patient"] } } }, // staff only: patient logins have no role
+    { $project: { ...keep("userId role status loginAt createdAt isDeleted"), reason: { $cond: [{ $in: ["$reason", LOGIN_REASONS] }, "$reason", "Other"] } } },
+  ],
+  efaxleads: [{ $project: keep(`specialistId specialistGroupId status tag appointmentId faxType source direction sentStatus efaxDate completedAt
+    isSMSSent SMSCount bookAppointmentSmsCount isMarkCompleted isForwarded isDeleted createdBy createdAt updatedAt`) }],
+  efaxstatuses: [{ $project: keep("name categoryId isPrimary isBlocked isDeleted") }],
+  efaxcategories: [{ $project: keep("name specialistId specialistGroupId isPrimary isDeleted") }],
+  requesteddocuments: [{ $project: { ...keep(`status sentBy createdBy createdAt updatedAt documentSubmittedTime followUpCount followUpDate
+    isDeleted`), specialistId: oid("$specialistId"), specialistGroupId: oid("$specialistGroupId") } }],
+  patientanalytics: [{ $project: keep(`specialistId specialistGroupId specialistGroupUserId status chatHandled chatActive totalMessagesCount
+    AverageResponseTime abandonendByPatient abandonendBySpecialist createdAt updatedAt`) }],
+  bookappointmentsms: [{ $project: { ...keep("smsType sentBySource sentBy fromEFax efaxLeadId isDeleted createdAt"),
+    specialistId: oid("$specialistId"), specialistGroupId: oid("$specialistGroupId") } }],
+  examprepsms: [{ $project: { ...keep("sentBy appointmentDate toBeDetermined isDeleted createdAt"),
+    specialistId: oid("$specialistId"), specialistGroupId: oid("$specialistGroupId"), examTypes: oids("$examTypes") } }],
+  examtypes: [{ $project: keep("name isBlocked isDeleted") }],
+  appointmentfeedbacks: [{ $project: { ...keep("appointmentId rating type_of_provider is_refer_to_friend isDeleted isBlocked"),
+    specialistId: oid("$specialistId"), specialistGroupId: oids("$specialistGroupId"), providerId: oid("$providerId"), pcpId: oid("$pcpId"),
+    createdAt: { $toDate: "$createdAt" } } }], // stored as epoch milliseconds
 };
+export const COLLECTIONS = Object.keys(SCOPES);
 
 function scope(collection: unknown, stages: Document[]): Document[] {
   if (typeof collection !== "string" || !COLLECTIONS.includes(collection)) throw new Error(`Lookup into "${JSON.stringify(collection)}" is not allowed`);
   if (!Array.isArray(stages)) throw new Error("pipeline must be an array of stages");
-  return [...(SCOPES[collection] ?? []), ...stages.map(scopeStage)];
+  return [...SCOPES[collection], ...stages.map(scopeStage)];
 }
 
 // Stages only nest inside $lookup, $unionWith and $facet, so these three cover every source at any depth.
@@ -72,10 +104,21 @@ function scopeStage(stage: Document): Document {
   return stage;
 }
 
+// Models writing long pipelines often drop a closing brace; showing where the JSON broke lets them fix it on the retry
+function parse(text: string) {
+  try {
+    return BSON.EJSON.parse(text);
+  } catch (e) {
+    const at = Number(/position (\d+)/.exec((e as Error).message)?.[1]);
+    if (!(e instanceof SyntaxError) || Number.isNaN(at)) throw e;
+    throw new Error(`${e.message} near "${text.slice(Math.max(0, at - 60), at + 10)}". Check that every { and [ before it is closed.`);
+  }
+}
+
 // Pipelines come from the model, which also reads user text and DB records, so treat them as hostile.
 // Checks run on the *parsed* pipeline re-serialized: a JSON escape like "$out" can't slip past.
 export function parsePipeline(collection: string, pipeline: unknown): Document[] {
-  const stages = BSON.EJSON.parse(typeof pipeline === "string" ? pipeline : JSON.stringify(pipeline));
+  const stages = parse(typeof pipeline === "string" ? pipeline : JSON.stringify(pipeline));
   if (!Array.isArray(stages)) throw new Error("pipeline must be an array of stages");
   const canon = JSON.stringify(stages);
   // $out/$merge are the only aggregation stages that write; the rest run server-side JS or inspect the server
