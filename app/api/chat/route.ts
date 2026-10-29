@@ -182,6 +182,34 @@ export async function POST(req: Request) {
 
   console.log(tag, "question:", history.at(-1)?.content, `(${history.length} msgs)`);
 
+  // NDJSON events: status (step label), delta (answer text), reset (drop streamed text), done (final reply), error
+  const ac = new AbortController(); // client went away: stream cancelled
+  const signal = AbortSignal.any([req.signal, ac.signal]);
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = (e: object) => {
+        if (!signal.aborted) controller.enqueue(new TextEncoder().encode(JSON.stringify(e) + "\n"));
+      };
+      try {
+        await run(history, tag, t0, signal, send);
+      } catch (e) {
+        console.error(tag, "failed", (e as Error).message);
+        send({ type: "error", error: "Something went wrong. Try again." });
+      } finally {
+        if (signal.aborted) console.log(tag, `aborted by client after ${Date.now() - t0}ms`);
+        try {
+          controller.close();
+        } catch {} // already closed by cancel()
+      }
+    },
+    cancel() {
+      ac.abort();
+    },
+  });
+  return new Response(stream, { headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache, no-transform" } });
+}
+
+async function run(history: object[], tag: string, t0: number, signal: AbortSignal, send: (e: object) => void) {
   const messages: object[] = [{ role: "system", content: system() }, ...history];
   const used = new Set<string>();
   const files: CsvFile[] = [];
@@ -190,17 +218,20 @@ export async function POST(req: Request) {
   const done = (reply: string) => {
     if (failedTools && !used.size) {
       console.warn(tag, `no database query succeeded (${failedTools} tool errors)`);
-      return Response.json({ error: "No database query succeeded. Check the database connection or rephrase your question." }, { status: 502 });
+      return send({ type: "error", error: "No database query succeeded. Check the database connection or rephrase your question." });
     }
     console.log(tag, `done in ${Date.now() - t0}ms`, `used=${[...used]}`, `files=${files.map((f) => `${f.name}(${f.rows})`)}`);
-    return Response.json({ ...splitFollowUps(reply), used: [...used], files, ...(model > 0 && { fallback: MODELS[model].id }) });
+    send({ type: "done", ...splitFollowUps(reply), used: [...used], files, ...(model > 0 && { fallback: MODELS[model].id }) });
   };
+  const hooks = { signal, onDelta: (text: string) => send({ type: "delta", text }), onReset: () => send({ type: "reset" }) };
 
   for (let step = 0; step < 10; step++) {
-    const out = await complete(messages, tools, MODELS, model, tag).catch((e: Error) => e);
+    if (step) send({ type: "status", text: "Reading the results" });
+    const out = await complete(messages, tools, MODELS, model, tag, fetch, 5_000, hooks).catch((e: Error) => e);
+    if (signal.aborted) return;
     if (out instanceof Error) {
-      console.error(tag, `failed in ${Date.now() - t0}ms`, out.message);
-      return Response.json({ error: out.message }, { status: out instanceof ContentFilteredError ? 422 : 502 });
+      console.error(tag, `failed in ${Date.now() - t0}ms`, out.message, out instanceof ContentFilteredError ? "(content filter)" : "");
+      return send({ type: "error", error: out.message });
     }
     model = out.model;
     const { msg } = out;
@@ -210,11 +241,13 @@ export async function POST(req: Request) {
     if (!msg.tool_calls?.length) return done(msg.content);
 
     for (const call of msg.tool_calls) {
+      if (signal.aborted) return;
       let content;
       try {
         const args: Args = JSON.parse(call.function.arguments);
         if (!TOOL_NAMES.includes(call.function.name)) throw new Error("Unknown tool");
         const csv = call.function.name === TOOL_NAMES[1];
+        send({ type: "status", text: call.function.name === TOOL_NAMES[2] ? "Calculating referral KPIs" : csv ? "Building the CSV" : `Looking up ${args.collection}` });
         console.log(tag, `[db] ${call.function.name}`, args.collection ?? "", typeof args.pipeline === "string" ? args.pipeline : JSON.stringify(args.pipeline ?? args));
         const t = Date.now();
         let result: object;

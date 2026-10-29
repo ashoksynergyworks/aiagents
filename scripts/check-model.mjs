@@ -131,6 +131,46 @@ await assert.rejects(run(mock), (e) => {
 });
 assert.deepEqual(mock.attempted, names);
 
+// Streaming: providers answer stream:true with SSE; text is forwarded as it arrives, the turn is still validated whole.
+const sse = (...chunks) =>
+  new Response(chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + ": keep-alive\n\ndata: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+const delta = (d, finish_reason = null) => ({ choices: [{ delta: d, finish_reason }] });
+function hooks(signal) {
+  const events = [];
+  return { events, signal, onDelta: (t) => events.push(t), onReset: () => events.push("<reset>") };
+}
+const runHooked = (mock, h) => complete([{ role: "user", content: "a report" }], tools, models, 0, "[test]", mock.fetcher, 0, h);
+
+let h = hooks();
+mock = stub(sse(delta({ content: "Ans" }), delta({ content: "wer" }), delta({}, "stop")));
+assert.equal((await runHooked(mock, h)).msg.content, "Answer");
+assert.deepEqual(h.events, ["Ans", "wer"]);
+
+// tool-call fragments are merged by index; text before a tool call is withdrawn with a reset
+h = hooks();
+const tc = toolCall();
+mock = stub(sse(
+  delta({ content: "Let me check" }),
+  delta({ tool_calls: [{ index: 0, id: tc.id, type: "function", function: { name: tc.function.name, arguments: tc.function.arguments.slice(0, 10) } }] }),
+  delta({ tool_calls: [{ index: 0, function: { arguments: tc.function.arguments.slice(10) } }] }, "tool_calls"),
+));
+assert.deepEqual((await runHooked(mock, h)).msg.tool_calls, [tc]);
+assert.deepEqual(h.events, ["Let me check", "<reset>"]);
+
+// a model that fails mid-answer resets the streamed text before the backup streams its own
+h = hooks();
+mock = stub(sse(delta({ content: "Par" }, "length")), sse(delta({ content: "Backup answer" }, "stop")));
+assert.equal((await runHooked(mock, h)).model, 1);
+assert.deepEqual(h.events, ["Par", "<reset>", "Backup answer"]);
+assert.deepEqual(mock.attempted, names);
+
+// a user's Stop rejects without cooling the model down
+h = hooks(AbortSignal.abort());
+mock = stub(new Error("aborted"));
+await assert.rejects(runHooked(mock, h));
+assert.equal(cooldown.size, 0);
+assert.deepEqual(mock.attempted, ["primary"]);
+
 console.log(
-  `model fallback ok: provider parsing, ${failures.length} failure modes, valid tool turns, sticky + wrap-around fallback, cooldown, 429 retry, keyless local provider, content filter, sanitized errors`,
+  `model fallback ok: provider parsing, ${failures.length} failure modes, valid tool turns, sticky + wrap-around fallback, cooldown, 429 retry, keyless local provider, content filter, sanitized errors, streaming`,
 );

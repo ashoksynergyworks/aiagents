@@ -1,9 +1,18 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 
 type CsvFile = { name: string; csv: string; rows: number };
-type Msg = { role: "user" | "assistant"; content: string; used?: string[]; files?: CsvFile[]; fallback?: string; followUps?: string[] };
+type Msg = {
+  role: "user" | "assistant";
+  content: string;
+  used?: string[];
+  files?: CsvFile[];
+  fallback?: string;
+  followUps?: string[];
+  streaming?: boolean;
+  stopped?: boolean;
+};
 type Chat = { id: string; title: string; messages: Msg[] };
 type DbStatus = { ok: boolean; db?: string; error?: string };
 
@@ -38,6 +47,7 @@ const ICONS = {
   check: "M20 6 9 17l-5-5",
   download: "M12 4v11m-4.5-4.5L12 15l4.5-4.5M5 20h14",
   copy: "M8 8V5a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-3M5 8h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z",
+  stop: "M7 7h10v10H7z",
 };
 
 function Icon({ name, className = "size-5" }: { name: keyof typeof ICONS; className?: string }) {
@@ -76,7 +86,8 @@ function download(f: CsvFile) {
 }
 
 // ponytail: only markdown pipe tables are parsed, the rest stays plain text; add react-markdown if replies need more
-function Reply({ text }: { text: string }) {
+// ponytail: memo only; batch deltas per animation frame if long chats still stutter while streaming
+const Reply = memo(function Reply({ text, streaming = false }: { text: string; streaming?: boolean }) {
   const blocks: (string | string[][] | { label: string })[] = [];
   // ponytail: models add **bold** despite the prompt; drop the markers rather than parse markdown
   for (const line of text.replaceAll("**", "").split("\n")) {
@@ -88,8 +99,11 @@ function Reply({ text }: { text: string }) {
       const cells = t.replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
       if (Array.isArray(last)) last.push(cells);
       else blocks.push([cells]);
-    } else if (LABEL.test(t)) blocks.push({ label: t.replace(/[*_#:]/g, "").trim() });
-    else if (typeof last === "string") blocks[blocks.length - 1] = `${last}\n${line}`;
+    } else if (LABEL.test(t)) {
+      const label = t.replace(/[*_#:]/g, "").trim();
+      if (streaming && /^follow/i.test(label)) break; // the server turns this section into chips at the end
+      blocks.push({ label });
+    } else if (typeof last === "string") blocks[blocks.length - 1] = `${last}\n${line}`;
     else blocks.push(line);
   }
   return blocks.map((b, i) => {
@@ -101,7 +115,8 @@ function Reply({ text }: { text: string }) {
         </h3>
       );
     const [head, ...body] = b;
-    const num = head.map((_, j) => body.length > 0 && body.every((r) => NUMERIC.test(r[j] ?? "")));
+    const settled = streaming ? body.slice(0, -1) : body; // a row still being written doesn't flip column alignment
+    const num = head.map((_, j) => settled.length > 0 && settled.every((r) => NUMERIC.test(r[j] ?? "")));
     return (
       <div key={i} className="overflow-x-auto rounded-xl border border-line bg-surface font-sans">
         <table className="w-full text-sm">
@@ -129,7 +144,7 @@ function Reply({ text }: { text: string }) {
       </div>
     );
   });
-}
+});
 
 export default function Home() {
   // ponytail: recents live in memory for this tab; persist to localStorage if people want them across reloads
@@ -141,7 +156,10 @@ export default function Home() {
   const [copied, setCopied] = useState<number | null>(null);
   const [menu, setMenu] = useState(false);
   const [db, setDb] = useState<DbStatus | null>(null); // null while checking
+  const [status, setStatus] = useState(""); // current step of the running request, from the server
+  const abortRef = useRef<AbortController>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const stick = useRef(true); // follow new text only while the reader is at the bottom
 
   useEffect(() => {
     checkDb().then(setDb);
@@ -151,8 +169,8 @@ export default function Home() {
   const messages = active?.messages ?? [];
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ block: "end" }); // braces: newer browsers return a Promise here
-  }, [active?.messages, loading]);
+    if (stick.current) endRef.current?.scrollIntoView({ block: "end" }); // braces: newer browsers return a Promise here
+  }, [active?.messages, loading, status]);
 
   function newChat() {
     setActiveId(null);
@@ -175,28 +193,59 @@ export default function Home() {
     setActiveId(id);
     setInput("");
     setError("");
+    setStatus("");
     setLoading(id);
+    stick.current = true;
+    const ac = (abortRef.current = new AbortController());
     const t0 = performance.now();
+    let streamed = "";
     console.log("[chat] →", text);
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: next.map(({ role, content }) => ({ role, content })) }), // CSVs stay client-side
+        signal: ac.signal,
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? "Request failed");
-      console.log("[chat] ←", `${Math.round(performance.now() - t0)}ms`, { used: data.used, files: data.files?.map((f: CsvFile) => `${f.name} (${f.rows} rows)`), fallback: data.fallback });
-      put([...next, { role: "assistant", content: data.reply, used: data.used, files: data.files, fallback: data.fallback, followUps: data.followUps }]);
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? "Request failed");
+      // NDJSON events from route.ts: status, delta, reset, done, error
+      let final: (Omit<Msg, "role" | "content"> & { reply: string }) | undefined;
+      let buf = "";
+      const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader();
+      for (let r = await reader.read(); !r.done; r = await reader.read()) {
+        const lines = (buf + r.value).split("\n");
+        buf = lines.pop()!;
+        for (const line of lines.filter(Boolean)) {
+          const e = JSON.parse(line);
+          if (e.type === "status") setStatus(e.text);
+          else if (e.type === "delta") {
+            streamed += e.text;
+            put([...next, { role: "assistant", content: streamed, streaming: true }]);
+          } else if (e.type === "reset") {
+            streamed = "";
+            put(next);
+          } else if (e.type === "error") throw new Error(e.error);
+          else if (e.type === "done") final = e;
+        }
+      }
+      if (!final) throw new Error("The connection dropped before the report finished. Try again.");
+      const { reply, used, files, fallback, followUps } = final;
+      console.log("[chat] ←", `${Math.round(performance.now() - t0)}ms`, { used, files: files?.map((f) => `${f.name} (${f.rows} rows)`), fallback });
+      put([...next, { role: "assistant", content: reply, used, files, fallback, followUps }]);
     } catch (e) {
-      console.error("[chat] failed", `${Math.round(performance.now() - t0)}ms`, e);
-      // roll back so the question can be edited and re-sent
-      if (prev.length) put(prev);
-      else setChats((cs) => cs.filter((c) => c.id !== id));
-      setInput(text);
-      setError((e as Error).message);
+      const stopped = (e as Error).name === "AbortError";
+      console[stopped ? "log" : "error"](stopped ? "[chat] stopped" : "[chat] failed", `${Math.round(performance.now() - t0)}ms`, e);
+      // a stopped answer keeps what it wrote; otherwise roll back so the question can be edited and re-sent
+      if (stopped && streamed) put([...next, { role: "assistant", content: streamed, stopped: true }]);
+      else {
+        if (prev.length) put(prev);
+        else setChats((cs) => cs.filter((c) => c.id !== id));
+        setInput(text);
+        if (!stopped) setError((e as Error).message);
+      }
     } finally {
       setLoading(null);
+      abortRef.current = null;
     }
   }
 
@@ -214,6 +263,7 @@ export default function Home() {
     </p>
   );
 
+  const busy = !!loading && loading === activeId;
   const composer = (
     <form
       onSubmit={(e) => {
@@ -237,16 +287,19 @@ export default function Home() {
             send(input);
           }
         }}
-        placeholder="Ask for a report, e.g. referrals per specialist group last month. Please don't type patient names."
+        placeholder="Ask for a report, e.g. referrals per specialist group last month. ."
         className="block max-h-60 min-h-14 w-full resize-none bg-transparent px-4 pt-4 text-base outline-none field-sizing-content placeholder:text-muted"
       />
       <div className="flex justify-end px-2.5 pb-2.5">
+        {/* while this chat's report runs, Send becomes Stop */}
         <button
-          aria-label="Send"
-          disabled={!!loading || !input.trim()}
+          type={busy ? "button" : "submit"}
+          aria-label={busy ? "Stop" : "Send"}
+          onClick={busy ? () => abortRef.current?.abort() : undefined}
+          disabled={!busy && (!!loading || !input.trim())}
           className="grid size-11 cursor-pointer place-items-center rounded-xl bg-primary text-paper transition-[background-color,transform] duration-150 hover:bg-primary-strong focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-primary active:scale-95 disabled:cursor-not-allowed disabled:opacity-35"
         >
-          <Icon name="send" />
+          <Icon name={busy ? "stop" : "send"} />
         </button>
       </div>
     </form>
@@ -282,6 +335,7 @@ export default function Home() {
                 <li key={c.id}>
                   <button
                     onClick={() => {
+                      stick.current = true;
                       setActiveId(c.id);
                       setError("");
                       setMenu(false);
@@ -367,7 +421,15 @@ export default function Home() {
           </main>
         ) : (
           <>
-            <main role="log" aria-live="polite" className="flex-1 overflow-y-auto">
+            <main
+              role="log"
+              aria-live="polite"
+              onScroll={(e) => {
+                const el = e.currentTarget;
+                stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+              }}
+              className="flex-1 overflow-y-auto"
+            >
               <div className="mx-auto max-w-3xl space-y-8 px-4 py-8 md:py-10">
                 {messages.map((m, i) =>
                   m.role === "user" ? (
@@ -375,56 +437,66 @@ export default function Home() {
                       <p className="max-w-[85%] rounded-2xl bg-primary-soft px-4 py-2.5 whitespace-pre-wrap">{m.content}</p>
                     </div>
                   ) : (
-                    <article key={i} className="animate-rise motion-reduce:animate-none">
+                    // aria-busy: screen readers read the answer once it is complete, not token by token
+                    <article key={i} aria-busy={m.streaming || undefined} className="animate-rise motion-reduce:animate-none">
                       <div className="space-y-3 font-serif text-[1.0625rem] leading-7">
-                        <Reply text={m.content} />
+                        <Reply text={m.content} streaming={m.streaming} />
                       </div>
-                      {m.files?.map((f) => (
-                        <button
-                          key={f.name}
-                          onClick={() => download(f)}
-                          aria-label={`Download ${f.name}`}
-                          className="group mt-4 flex w-full max-w-md cursor-pointer items-center gap-3 rounded-xl border border-line bg-surface p-3 text-left transition-colors duration-150 hover:border-primary/40 focus-visible:outline-3 focus-visible:outline-primary"
-                        >
-                          <span className="grid size-10 shrink-0 place-items-center rounded-lg bg-primary-soft text-[0.6875rem] font-semibold tracking-wide text-primary">CSV</span>
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-sm font-medium">{f.name}</span>
-                            <span className="block text-xs text-muted">
-                              {f.rows.toLocaleString()} {f.rows === 1 ? "row" : "rows"}
+                      {!m.streaming && (
+                        <>
+                        {m.files?.map((f) => (
+                          <button
+                            key={f.name}
+                            onClick={() => download(f)}
+                            aria-label={`Download ${f.name}`}
+                            className="group mt-4 flex w-full max-w-md cursor-pointer items-center gap-3 rounded-xl border border-line bg-surface p-3 text-left transition-colors duration-150 hover:border-primary/40 focus-visible:outline-3 focus-visible:outline-primary"
+                          >
+                            <span className="grid size-10 shrink-0 place-items-center rounded-lg bg-primary-soft text-[0.6875rem] font-semibold tracking-wide text-primary">CSV</span>
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-sm font-medium">{f.name}</span>
+                              <span className="block text-xs text-muted">
+                                {f.rows.toLocaleString()} {f.rows === 1 ? "row" : "rows"}
+                              </span>
                             </span>
-                          </span>
-                          <span className="grid size-9 shrink-0 place-items-center rounded-lg text-muted transition-colors duration-150 group-hover:bg-primary group-hover:text-paper">
-                            <Icon name="download" className="size-4" />
-                          </span>
-                        </button>
-                      ))}
-                      <div className="mt-2 flex items-center gap-2 text-xs text-muted">
-                        <button
-                          onClick={() => copy(i, m.content)}
-                          aria-label={copied === i ? "Copied" : "Copy reply"}
-                          className="-ml-2 grid size-9 cursor-pointer place-items-center rounded-lg transition-colors duration-150 hover:bg-sidebar hover:text-ink focus-visible:outline-3 focus-visible:outline-primary"
-                        >
-                          <Icon name={copied === i ? "check" : "copy"} className="size-4" />
-                        </button>
-                        {!!m.used?.length && <span>Queried {m.used.join(", ")}</span>}
-                        {m.fallback && <span>· answered by fallback model {m.fallback}</span>}
-                      </div>
-                      {i === messages.length - 1 && !!m.followUps?.length && (
-                        <div role="group" aria-label="Follow-up questions" className="mt-3 flex flex-wrap gap-2">
-                          {m.followUps.map((q) => (
-                            <button key={q} onClick={() => send(q)} disabled={!!loading} className={`${CHIP} py-2 text-left disabled:cursor-wait disabled:opacity-50`}>
-                              {q}
-                            </button>
-                          ))}
+                            <span className="grid size-9 shrink-0 place-items-center rounded-lg text-muted transition-colors duration-150 group-hover:bg-primary group-hover:text-paper">
+                              <Icon name="download" className="size-4" />
+                            </span>
+                          </button>
+                        ))}
+                        <div className="mt-2 flex items-center gap-2 text-xs text-muted">
+                          <button
+                            onClick={() => copy(i, m.content)}
+                            aria-label={copied === i ? "Copied" : "Copy reply"}
+                            className="-ml-2 grid size-9 cursor-pointer place-items-center rounded-lg transition-colors duration-150 hover:bg-sidebar hover:text-ink focus-visible:outline-3 focus-visible:outline-primary"
+                          >
+                            <Icon name={copied === i ? "check" : "copy"} className="size-4" />
+                          </button>
+                          {!!m.used?.length && <span>Queried {m.used.join(", ")}</span>}
+                          {m.fallback && <span>· answered by fallback model {m.fallback}</span>}
+                          {m.stopped && <span>· Stopped</span>}
                         </div>
+                        {i === messages.length - 1 && !!m.followUps?.length && (
+                          <div role="group" aria-label="Follow-up questions" className="mt-3 flex flex-wrap gap-2">
+                            {m.followUps.map((q) => (
+                              <button key={q} onClick={() => send(q)} disabled={!!loading} className={`${CHIP} py-2 text-left disabled:cursor-wait disabled:opacity-50`}>
+                                {q}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        </>
                       )}
                     </article>
                   ),
                 )}
-                {loading === activeId && (
+                {busy && (
                   <p role="status" className="flex items-center gap-3 text-sm text-muted">
                     <Mark running className="size-7" />
-                    Running queries. Reports can take up to a minute.
+                    {messages.at(-1)?.streaming ? (
+                      <span className="sr-only">Writing the report</span>
+                    ) : (
+                      `${status || "Running queries"}. Reports can take up to a minute.`
+                    )}
                   </p>
                 )}
                 <div ref={endRef} />

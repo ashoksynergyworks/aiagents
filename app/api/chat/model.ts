@@ -103,9 +103,70 @@ function parseCompletion(body: unknown): { msg: ModelMessage; finish: unknown; u
   return { msg: { content, ...(tool_calls?.length && { tool_calls }) }, finish: choice.finish_reason, usage: record(response?.usage) };
 }
 
+// Rebuilds a streamed (SSE) completion into the non-streamed body shape, so parseCompletion validates both the same way.
+// Content is forwarded as it arrives until the turn shows a tool call; a tool turn's text is not the answer.
+async function readSse(res: Response, onDelta: (text: string) => void) {
+  if (!res.body) throw new InvalidCompletion("empty stream");
+  let content = "";
+  let refusal = "";
+  let finish: unknown = null;
+  let usage: unknown;
+  const calls: { id?: unknown; type?: unknown; function: { name?: unknown; arguments: string } }[] = [];
+  const build = () => ({
+    choices: [{ finish_reason: finish, message: { content, ...(refusal && { refusal }), ...(calls.length && { tool_calls: calls.filter(Boolean) }) } }],
+    usage,
+  });
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buf = "";
+  for (let r = await reader.read(); !r.done; r = await reader.read()) {
+    const lines = (buf + r.value).split("\n");
+    buf = lines.pop()!;
+    for (const line of lines) {
+      const data = line.startsWith("data:") ? line.slice(5).trim() : ""; // skips ": keep-alive" comments and blank separators
+      if (!data) continue;
+      if (data === "[DONE]") {
+        reader.cancel().catch(() => {});
+        return build();
+      }
+      let chunk: Record<string, unknown> | null;
+      try {
+        chunk = record(JSON.parse(data));
+      } catch {
+        throw new InvalidCompletion("invalid stream chunk");
+      }
+      if (chunk?.error) throw new InvalidCompletion("stream error");
+      usage = record(chunk?.usage) ?? usage;
+      const choice = Array.isArray(chunk?.choices) ? record(chunk.choices[0]) : null;
+      if (!choice) continue; // e.g. a usage-only last chunk
+      if (choice.finish_reason != null) finish = choice.finish_reason;
+      const delta = record(choice.delta);
+      if (Array.isArray(delta?.tool_calls))
+        for (const d of delta.tool_calls) {
+          const tc = record(d);
+          const fn = record(tc?.function);
+          const call = (calls[Number(tc?.index ?? calls.length)] ??= { function: { arguments: "" } });
+          call.id ??= tc?.id;
+          call.type ??= tc?.type;
+          call.function.name ??= fn?.name;
+          if (typeof fn?.arguments === "string") call.function.arguments += fn.arguments;
+        }
+      if (typeof delta?.content === "string" && delta.content) {
+        content += delta.content;
+        if (!calls.length) onDelta(delta.content);
+      }
+      if (typeof delta?.refusal === "string") refusal += delta.refusal;
+    }
+  }
+  if (finish == null) throw new InvalidCompletion("stream ended early");
+  return build();
+}
+
+type Hooks = { onDelta?: (text: string) => void; onReset?: () => void; signal?: AbortSignal };
+
 // Tries the current model, then the rest of the list wrapping around. Each gets the same messages, so whichever
 // model picks the request up continues from the queries already run. Models in cooldown are skipped unless all are.
-export async function complete(messages: object[], tools: object[], models: readonly Model[], from: number, tag: string, fetcher: typeof fetch = fetch, retryAfterMs = 5_000) {
+// onReset: text already sent through onDelta is not the answer (the turn called tools, or the model failed mid-answer).
+export async function complete(messages: object[], tools: object[], models: readonly Model[], from: number, tag: string, fetcher: typeof fetch = fetch, retryAfterMs = 5_000, hooks: Hooks = {}) {
   const errors: string[] = [];
   const order = models.map((_, k) => (from + k) % models.length);
   const ready = order.filter((i) => !((cooldown.get(models[i].id) ?? 0) > Date.now()));
@@ -120,28 +181,40 @@ export async function complete(messages: object[], tools: object[], models: read
     for (const i of attempts) {
       const m = models[i];
       const t = Date.now();
+      let emitted = false;
       try {
         const res = await fetcher(m.url, {
           method: "POST",
           headers: { "Content-Type": "application/json", ...(m.key && { Authorization: `Bearer ${m.key}` }) },
           // Reasoning models use part of the token budget for thinking.
-          body: JSON.stringify({ model: m.name, messages, tools, temperature: 0.2, max_tokens: 4096 }),
-          signal: AbortSignal.timeout(m.timeout),
+          // ponytail: no stream_options (some servers reject unknown params), so usage is logged only when sent in-stream
+          body: JSON.stringify({ model: m.name, messages, tools, temperature: 0.2, max_tokens: 4096, stream: true }),
+          signal: AbortSignal.any([AbortSignal.timeout(m.timeout), ...(hooks.signal ? [hooks.signal] : [])]),
         });
         if (res.status === 429) limited.push(i);
         if (!res.ok) throw new InvalidCompletion(`HTTP ${res.status}`);
         let body: unknown;
-        try {
-          body = await res.json();
-        } catch {
-          throw new InvalidCompletion("invalid JSON response");
-        }
+        // a provider that ignores stream:true answers with plain JSON
+        if (res.headers.get("content-type")?.includes("text/event-stream"))
+          body = await readSse(res, (text) => {
+            emitted = true;
+            hooks.onDelta?.(text);
+          });
+        else
+          try {
+            body = await res.json();
+          } catch {
+            throw new InvalidCompletion("invalid JSON response");
+          }
         const { msg, finish, usage } = parseCompletion(body);
+        if (msg.tool_calls && emitted) hooks.onReset?.();
         console.log(tag, "[ai]", m.id, `${Date.now() - t}ms`, `tokens in=${usage?.prompt_tokens} out=${usage?.completion_tokens}`, `finish=${finish}`, `tool_calls=${msg.tool_calls?.length ?? 0}`);
         cooldown.delete(m.id);
         return { msg, model: i };
       } catch (e) {
-        if (e instanceof ContentFilteredError) throw e;
+        // a user's Stop is not a model failure: no cooldown, no other model
+        if (e instanceof ContentFilteredError || hooks.signal?.aborted) throw e;
+        if (emitted) hooks.onReset?.();
         // Provider error bodies can echo request contents: only report status or our own validation errors.
         const reason = e instanceof InvalidCompletion ? e.message : e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError") ? "timeout" : "network error";
         errors.push(`${m.id}: ${reason}`);
