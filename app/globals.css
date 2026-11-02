@@ -1,19 +1,19 @@
 @import "tailwindcss";
 
 @theme inline {
-  /* Poppins for UI and answers; Newsreader only for the wordmark and the empty-state heading */
-  --font-sans: var(--font-poppins);
+  /* DM Sans for UI and answers; Newsreader only for the empty-state heading */
+  --font-sans: var(--font-dm-sans);
   --font-serif: var(--font-newsreader);
 }
 
 @theme {
   /* warm paper neutrals; brand: navy #323c7a (primary), rose #cc485f (secondary) */
-  --color-paper: oklch(0.985 0.004 80);
-  --color-sidebar: oklch(0.962 0.006 80);
-  --color-surface: oklch(0.995 0.002 80);
-  --color-line: oklch(0.9 0.008 80);
-  --color-ink: oklch(0.25 0.012 80);
-  --color-muted: oklch(0.5 0.012 80);
+  --color-paper: #fcfcfa;
+  --color-sidebar: #f7f3ee;
+  --color-surface: #fefefd;
+  --color-line: #ebe5df;
+  --color-ink: #111720;
+  --color-muted: #73706c;
   --color-primary: #323c7a;
   --color-primary-strong: #262e60;
   --color-primary-soft: oklch(0.94 0.018 275);

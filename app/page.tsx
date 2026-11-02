@@ -1,6 +1,8 @@
 "use client";
 
+import Image from "next/image";
 import { memo, useEffect, useRef, useState } from "react";
+import logo from "./promptKPI.png";
 
 type CsvFile = { name: string; csv: string; rows: number };
 type Msg = {
@@ -24,17 +26,19 @@ async function checkDb(): Promise<DbStatus> {
   return s;
 }
 
+const ROSE = "bg-[#fdece8] text-[#e05260]";
+const VIOLET = "bg-[#efe8f9] text-[#6c4fcf]";
 const SUGGESTIONS = [
-  { label: "What needs attention", prompt: "What needs my attention this week?" },
-  { label: "Monthly referrals", prompt: "How many referrals came in each month this year?" },
-  { label: "Top specialist groups", prompt: "Top 10 specialist groups by referrals in the last 90 days" },
-  { label: "Office report (CSV)", prompt: "CSV of appointments created with each specialist office last month" },
-  { label: "High-risk by PCP", prompt: "Which PCPs sent the most high-risk referrals?" },
-  { label: "This month vs last", prompt: "Show me appointment analytics for this month compared with last month" },
-];
+  { label: "What needs attention", prompt: "What needs my attention this week?", icon: "chart", tone: ROSE },
+  { label: "Monthly referrals", prompt: "How many referrals came in each month this year?", icon: "users", tone: VIOLET },
+  { label: "Top specialist groups", prompt: "Top 10 specialist groups by referrals in the last 90 days", icon: "star", tone: ROSE },
+  { label: "Office report (CSV)", prompt: "CSV of appointments created with each specialist office last month", icon: "file", tone: VIOLET },
+  { label: "High-risk by PCP", prompt: "Which PCPs sent the most high-risk referrals?", icon: "alert", tone: ROSE },
+  { label: "This month vs last", prompt: "Show me appointment analytics for this month compared with last month", icon: "trend", tone: VIOLET },
+] as const;
 
 const CHIP =
-  "min-h-11 cursor-pointer rounded-xl border border-line bg-surface px-3.5 text-sm text-ink/80 transition-colors duration-150 hover:border-primary/40 hover:text-ink focus-visible:outline-3 focus-visible:outline-primary";
+  "min-h-11 cursor-pointer rounded-2xl border border-[#f1eae6] bg-surface text-[15px] text-ink shadow-[0_1px_3px_rgb(17_23_32/0.03)] transition-colors duration-150 hover:border-secondary/30 focus-visible:outline-3 focus-visible:outline-primary";
 
 const NUMERIC = /^-?[\d,.]+%?$/;
 // insight section labels the agent writes on their own line (route.ts system prompt)
@@ -48,6 +52,13 @@ const ICONS = {
   download: "M12 4v11m-4.5-4.5L12 15l4.5-4.5M5 20h14",
   copy: "M8 8V5a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1h-3M5 8h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z",
   stop: "M7 7h10v10H7z",
+  search: "m21 21-4.3-4.3M3 11a8 8 0 1 0 16 0 8 8 0 1 0-16 0",
+  chart: "M4 20h16M7.5 16v-3M11 16V8M14.5 16v-5M18 16V6",
+  users: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M5 7a4 4 0 1 0 8 0 4 4 0 1 0-8 0M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75",
+  star: "m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z",
+  file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6",
+  alert: "M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01",
+  trend: "m22 7-8.5 8.5-5-5L2 17M16 7h6v6",
 };
 
 function Icon({ name, className = "size-5" }: { name: keyof typeof ICONS; className?: string }) {
@@ -300,11 +311,15 @@ export default function Home() {
         e.preventDefault();
         send(input);
       }}
-      className="rounded-2xl border border-line bg-surface shadow-[0_1px_2px_oklch(0.25_0.012_80/0.05),0_8px_28px_-12px_oklch(0.25_0.012_80/0.18)] transition-colors duration-200 focus-within:border-primary/50"
+      // gradient border: surface fill on the padding box, rose → lavender on the border box
+      className="flex items-end gap-3 rounded-2xl border border-transparent p-3.5 pl-4 md:gap-5 md:pl-6 shadow-[-8px_8px_28px_-14px_rgb(224_82_96/0.2),8px_8px_28px_-14px_rgb(108_79_207/0.16)] transition-shadow duration-200 [background:linear-gradient(var(--color-surface),var(--color-surface))_padding-box,linear-gradient(90deg,#f4cad0,#d8cdf0)_border-box] focus-within:shadow-[-8px_8px_28px_-10px_rgb(224_82_96/0.34),8px_8px_28px_-10px_rgb(108_79_207/0.28)]"
     >
       <label htmlFor="q" className="sr-only">
         Ask for a report
       </label>
+      <span className="grid h-12 shrink-0 place-items-center self-start text-muted">
+        <Icon name="search" className="size-6" />
+      </span>
       <textarea
         id="q"
         rows={1}
@@ -317,21 +332,19 @@ export default function Home() {
             send(input);
           }
         }}
-        placeholder="Ask for a report, e.g. referrals per specialist group last month. ."
-        className="block max-h-60 min-h-14 w-full resize-none bg-transparent px-4 pt-4 text-base outline-none field-sizing-content placeholder:text-muted"
+        placeholder="Ask for a report, e.g. referrals per specialist group last month ."
+        className="block max-h-60 min-h-12 min-w-0 flex-1 resize-none bg-transparent py-3 text-base leading-6 outline-none field-sizing-content placeholder:text-muted"
       />
-      <div className="flex justify-end px-2.5 pb-2.5">
-        {/* while this chat's report runs, Send becomes Stop */}
-        <button
-          type={busy ? "button" : "submit"}
-          aria-label={busy ? "Stop" : "Send"}
-          onClick={busy ? () => abortRef.current?.abort() : undefined}
-          disabled={!busy && (!!loading || !input.trim())}
-          className="grid size-11 cursor-pointer place-items-center rounded-xl bg-primary text-paper transition-[background-color,transform] duration-150 hover:bg-primary-strong focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-primary active:scale-95 disabled:cursor-not-allowed disabled:opacity-35"
-        >
-          <Icon name={busy ? "stop" : "send"} />
-        </button>
-      </div>
+      {/* while this chat's report runs, Send becomes Stop */}
+      <button
+        type={busy ? "button" : "submit"}
+        aria-label={busy ? "Stop" : "Send"}
+        onClick={busy ? () => abortRef.current?.abort() : undefined}
+        disabled={!busy && (!!loading || !input.trim())}
+        className="grid size-12 shrink-0 cursor-pointer place-items-center rounded-xl bg-primary text-paper transition-[background-color,transform] duration-150 hover:bg-primary-strong focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-primary active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <Icon name={busy ? "stop" : "send"} />
+      </button>
     </form>
   );
 
@@ -340,25 +353,24 @@ export default function Home() {
       <aside
         className={`${menu ? "fixed inset-y-0 left-0 z-30 flex" : "hidden"} w-72 flex-col border-r border-line bg-sidebar md:static md:flex md:w-64`}
       >
-        <div className="flex items-center gap-2.5 px-5 pt-5 pb-4">
-          <Mark className="size-6" />
-          <span className="font-serif text-xl tracking-[-0.01em]">Prompt KPI</span>
+        <div className="px-8 pt-8 pb-10">
+          <Image src={logo} alt="Prompt KPI" height={30} loading="eager" />
         </div>
-        <div className="px-3">
+        <div className="px-5">
           <button
             onClick={newChat}
-            className="flex min-h-11 w-full cursor-pointer items-center gap-3 rounded-xl px-2 text-sm font-medium transition-colors duration-150 hover:bg-paper focus-visible:outline-3 focus-visible:outline-primary"
+            className="flex min-h-17 w-full cursor-pointer items-center gap-4.5 rounded-3xl bg-[#f8e9e5] px-3 text-[15px] font-semibold shadow-[0_6px_20px_-10px_rgb(224_82_96/0.25)] transition-colors duration-150 hover:bg-[#f5dfda] focus-visible:outline-3 focus-visible:outline-primary"
           >
-            <span className="grid size-7 place-items-center rounded-full bg-secondary text-paper">
-              <Icon name="plus" className="size-4" />
+            <span className="grid size-11 place-items-center rounded-full bg-linear-to-b from-[#de6874] to-[#d4545f] text-paper shadow-[0_4px_10px_-4px_rgb(212_84_95/0.6)]">
+              <Icon name="plus" className="size-5" />
             </span>
             New report
           </button>
         </div>
-        <nav aria-label="Recent reports" className="mt-6 flex-1 overflow-y-auto px-3">
-          <p className="px-2 pb-2 text-xs font-medium text-muted">Recents</p>
+        <nav aria-label="Recent reports" className="mx-5 mt-6 flex-1 overflow-y-auto border-t border-line pt-6">
+          <p className="px-2 pb-3 text-sm font-semibold text-muted">Recents</p>
           {chats.length === 0 ? (
-            <p className="px-2 text-sm text-muted">Reports you run in this tab show up here.</p>
+            <p className="px-2 text-sm leading-relaxed text-muted">Reports you run in this tab show up here.</p>
           ) : (
             <ul className="space-y-0.5">
               {chats.map((c) => (
@@ -421,7 +433,11 @@ export default function Home() {
           >
             <Icon name="menu" />
           </button>
-          <span className="truncate px-2 font-serif text-lg">{active?.title ?? "Prompt KPI"}</span>
+          {active ? (
+            <span className="truncate px-2 font-serif text-lg">{active.title}</span>
+          ) : (
+            <Image src={logo} alt="Prompt KPI" height={24} loading="eager" />
+          )}
           <button
             aria-label="New report"
             onClick={newChat}
@@ -432,17 +448,21 @@ export default function Home() {
         </header>
 
         {messages.length === 0 ? (
-          <main className="flex flex-1 flex-col items-center justify-center px-4 pb-[12vh]">
-            <div className="w-full max-w-2xl">
-              <h2 className="mb-8 flex items-center justify-center gap-3 text-center font-serif text-[1.75rem] leading-tight tracking-[-0.015em] text-balance md:text-[2.5rem]">
-                <Mark className="size-8 md:size-10" />
-                What would you like to report on?
+          <main className="flex flex-1 flex-col items-center justify-center px-4 py-8">
+            <div className="w-full max-w-[50rem]">
+              <h2 className="mb-9 text-center font-serif text-[2.5rem] leading-[1.07] font-medium tracking-[-0.025em] text-[#0f1720] md:text-[3.5rem]">
+                What would you like
+                <br />
+                to <span className="bg-linear-to-r from-[#d6617a] to-[#7b5fc4] bg-clip-text text-transparent">report on?</span>
               </h2>
               {alert}
               {composer}
-              <div className="mt-4 flex flex-wrap justify-center gap-2">
+              <div className="mt-8 flex flex-wrap justify-center gap-x-4.5 gap-y-3">
                 {SUGGESTIONS.map((s) => (
-                  <button key={s.label} onClick={() => send(s.prompt)} title={s.prompt} className={CHIP}>
+                  <button key={s.label} onClick={() => send(s.prompt)} title={s.prompt} className={`${CHIP} flex items-center gap-4 py-2 pr-5 pl-3`}>
+                    <span className={`grid size-9 place-items-center rounded-full ${s.tone}`}>
+                      <Icon name={s.icon} className="size-4.5" />
+                    </span>
                     {s.label}
                   </button>
                 ))}
@@ -508,7 +528,7 @@ export default function Home() {
                         {i === messages.length - 1 && !!m.followUps?.length && (
                           <div role="group" aria-label="Follow-up questions" className="mt-3 flex flex-wrap gap-2">
                             {m.followUps.map((q) => (
-                              <button key={q} onClick={() => send(q)} disabled={!!loading} className={`${CHIP} py-2 text-left disabled:cursor-wait disabled:opacity-50`}>
+                              <button key={q} onClick={() => send(q)} disabled={!!loading} className={`${CHIP} px-3.5 py-2 text-left disabled:cursor-wait disabled:opacity-50`}>
                                 {q}
                               </button>
                             ))}
