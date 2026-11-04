@@ -1,8 +1,7 @@
 "use client";
 
-import Image from "next/image";
-import { memo, useEffect, useRef, useState } from "react";
-import logo from "./promptKPI.png";
+import { memo, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import Logo from "./Logo";
 
 type CsvFile = { name: string; csv: string; rows: number };
 type Msg = {
@@ -26,19 +25,19 @@ async function checkDb(): Promise<DbStatus> {
   return s;
 }
 
-const ROSE = "bg-[#fdece8] text-[#e05260]";
-const VIOLET = "bg-[#efe8f9] text-[#6c4fcf]";
+const ACCENT = "bg-secondary/10 text-secondary";
+const MID = "bg-tertiary/10 text-tertiary";
 const SUGGESTIONS = [
-  { label: "What needs attention", prompt: "What needs my attention this week?", icon: "chart", tone: ROSE },
-  { label: "Monthly referrals", prompt: "How many referrals came in each month this year?", icon: "users", tone: VIOLET },
-  { label: "Top specialist groups", prompt: "Top 10 specialist groups by referrals in the last 90 days", icon: "star", tone: ROSE },
-  { label: "Office report (CSV)", prompt: "CSV of appointments created with each specialist office last month", icon: "file", tone: VIOLET },
-  { label: "High-risk by PCP", prompt: "Which PCPs sent the most high-risk referrals?", icon: "alert", tone: ROSE },
-  { label: "This month vs last", prompt: "Show me appointment analytics for this month compared with last month", icon: "trend", tone: VIOLET },
+  { label: "What needs attention", prompt: "What needs my attention this week?", icon: "chart", tone: ACCENT },
+  { label: "Monthly referrals", prompt: "How many referrals came in each month this year?", icon: "users", tone: MID },
+  { label: "Top specialist groups", prompt: "Top 10 specialist groups by referrals in the last 90 days", icon: "star", tone: ACCENT },
+  { label: "Office report (CSV)", prompt: "CSV of appointments created with each specialist office last month", icon: "file", tone: MID },
+  { label: "High-risk by PCP", prompt: "Which PCPs sent the most high-risk referrals?", icon: "alert", tone: ACCENT },
+  { label: "This month vs last", prompt: "Show me appointment analytics for this month compared with last month", icon: "trend", tone: MID },
 ] as const;
 
 const CHIP =
-  "min-h-11 cursor-pointer rounded-2xl border border-[#f1eae6] bg-surface text-[15px] text-ink shadow-[0_1px_3px_rgb(17_23_32/0.03)] transition-colors duration-150 hover:border-secondary/30 focus-visible:outline-3 focus-visible:outline-primary";
+  "min-h-11 cursor-pointer rounded-2xl border border-line/70 bg-surface text-[15px] text-ink shadow-[0_1px_3px_rgb(17_23_32/0.03)] transition-colors duration-150 hover:border-secondary/30 focus-visible:outline-3 focus-visible:outline-primary";
 
 const NUMERIC = /^-?[\d,.]+%?$/;
 // insight section labels the agent writes on their own line (route.ts system prompt)
@@ -85,6 +84,62 @@ function Mark({ className = "", running = false }: { className?: string; running
       <circle cx="6" cy="18" r="3" className="fill-primary" />
       <circle cx="18" cy="6" r="3" className="fill-secondary" />
     </svg>
+  );
+}
+
+// themes live in globals.css; <html data-theme> picks one, set before paint by the script in layout.tsx
+const THEMES = ["Dusk", "Ocean", "Forest", "Ember", "Graphite"];
+const html = () => document.documentElement;
+const savedTheme = () => {
+  try {
+    return localStorage.getItem("theme");
+  } catch {
+    return null; // storage blocked (private mode, policy): stay on Dusk
+  }
+};
+function watchTheme(onChange: () => void) {
+  const o = new MutationObserver(onChange);
+  o.observe(html(), { attributeFilter: ["data-theme"] });
+  return () => o.disconnect();
+}
+
+function ThemePicker() {
+  const theme = useSyncExternalStore(watchTheme, () => html().dataset.theme ?? "dusk", () => "dusk");
+  // dev only: Strict Mode's remount strips the attribute the inline script set, so put it back before paint
+  useLayoutEffect(() => {
+    const t = savedTheme();
+    if (t) html().dataset.theme = t;
+  }, []);
+  function pick(t: string) {
+    html().dataset.theme = t;
+    try {
+      localStorage.setItem("theme", t);
+    } catch {}
+  }
+  return (
+    <div className="flex items-center justify-between">
+      <span id="theme-label" className="font-semibold">
+        Theme
+      </span>
+      <div role="radiogroup" aria-labelledby="theme-label" className="flex gap-0.5">
+        {THEMES.map((name) => {
+          const t = name.toLowerCase();
+          return (
+            // data-theme scopes this swatch to its own palette, so it previews the theme it picks
+            <label
+              key={t}
+              title={name}
+              data-theme={t}
+              className="grid size-8 cursor-pointer place-items-center rounded-full transition-colors duration-150 hover:bg-paper has-checked:ring-2 has-checked:ring-primary has-focus-visible:outline-3 has-focus-visible:outline-primary"
+            >
+              <input type="radio" name="theme" value={t} checked={theme === t} onChange={() => pick(t)} className="sr-only" />
+              <span aria-hidden="true" className="size-5 rounded-full bg-linear-135 from-primary via-tertiary to-secondary" />
+              <span className="sr-only">{name}</span>
+            </label>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -311,8 +366,8 @@ export default function Home() {
         e.preventDefault();
         send(input);
       }}
-      // gradient border: surface fill on the padding box, rose → lavender on the border box
-      className="flex items-end gap-3 rounded-2xl border border-transparent p-3.5 pl-4 md:gap-5 md:pl-6 shadow-[-8px_8px_28px_-14px_rgb(224_82_96/0.2),8px_8px_28px_-14px_rgb(108_79_207/0.16)] transition-shadow duration-200 [background:linear-gradient(var(--color-surface),var(--color-surface))_padding-box,linear-gradient(90deg,#f4cad0,#d8cdf0)_border-box] focus-within:shadow-[-8px_8px_28px_-10px_rgb(224_82_96/0.34),8px_8px_28px_-10px_rgb(108_79_207/0.28)]"
+      // gradient border: surface fill on the padding box, accent → mid tint on the border box; glow in the same two
+      className="flex items-end gap-3 rounded-2xl border border-transparent p-3.5 pl-4 md:gap-5 md:pl-6 shadow-[-8px_8px_28px_-14px_color-mix(in_oklab,var(--secondary)_20%,transparent),8px_8px_28px_-14px_color-mix(in_oklab,var(--tertiary)_16%,transparent)] transition-shadow duration-200 [background:linear-gradient(var(--color-surface),var(--color-surface))_padding-box,linear-gradient(90deg,color-mix(in_oklab,var(--secondary)_30%,var(--color-surface)),color-mix(in_oklab,var(--tertiary)_25%,var(--color-surface)))_border-box] focus-within:shadow-[-8px_8px_28px_-10px_color-mix(in_oklab,var(--secondary)_34%,transparent),8px_8px_28px_-10px_color-mix(in_oklab,var(--tertiary)_28%,transparent)]"
     >
       <label htmlFor="q" className="sr-only">
         Ask for a report
@@ -353,15 +408,15 @@ export default function Home() {
       <aside
         className={`${menu ? "fixed inset-y-0 left-0 z-30 flex" : "hidden"} w-72 flex-col border-r border-line bg-sidebar md:static md:flex md:w-64`}
       >
-        <div className="px-8 pt-8 pb-10">
-          <Image src={logo} alt="Prompt KPI" height={30} loading="eager" />
+        <div className="px-7 pt-8 pb-10">
+          <Logo className="h-7" />
         </div>
         <div className="px-5">
           <button
             onClick={newChat}
-            className="flex min-h-17 w-full cursor-pointer items-center gap-4.5 rounded-3xl bg-[#f8e9e5] px-3 text-[15px] font-semibold shadow-[0_6px_20px_-10px_rgb(224_82_96/0.25)] transition-colors duration-150 hover:bg-[#f5dfda] focus-visible:outline-3 focus-visible:outline-primary"
+            className="flex min-h-17 w-full cursor-pointer items-center gap-4.5 rounded-3xl bg-secondary/8 px-3 text-[15px] font-semibold shadow-[0_6px_20px_-10px_color-mix(in_oklab,var(--secondary)_25%,transparent)] transition-colors duration-150 hover:bg-secondary/12 focus-visible:outline-3 focus-visible:outline-primary"
           >
-            <span className="grid size-11 place-items-center rounded-full bg-linear-to-b from-[#de6874] to-[#d4545f] text-paper shadow-[0_4px_10px_-4px_rgb(212_84_95/0.6)]">
+            <span className="grid size-11 place-items-center rounded-full bg-linear-to-b from-secondary to-[color-mix(in_oklab,var(--secondary),var(--tertiary)_15%)] text-paper shadow-[0_4px_10px_-4px_color-mix(in_oklab,var(--secondary)_60%,transparent)]">
               <Icon name="plus" className="size-5" />
             </span>
             New report
@@ -392,7 +447,8 @@ export default function Home() {
             </ul>
           )}
         </nav>
-        <div className="border-t border-line px-5 py-3 text-xs text-muted">
+        <div className="space-y-2 border-t border-line px-5 py-3 text-xs text-muted">
+          <ThemePicker />
           <div className="flex items-center gap-2">
             <span className={`size-1.5 shrink-0 rounded-full ${!db ? "animate-pulse bg-muted" : db.ok ? "bg-primary" : "bg-secondary"}`} />
             <span role="status" className="min-w-0 flex-1 truncate">
@@ -417,7 +473,8 @@ export default function Home() {
               {db?.ok === false ? "Retry" : "Check"}
             </button>
           </div>
-          {db?.error && <p className="mt-1.5 line-clamp-3 wrap-break-word text-secondary">{db.error}</p>}
+          {/* ink, not the accent: accents are only ≥3:1, too faint for small text */}
+          {db?.error && <p className="mt-1.5 line-clamp-3 wrap-break-word text-ink/80">{db.error}</p>}
         </div>
       </aside>
       {menu && <button aria-label="Close menu" onClick={() => setMenu(false)} className="fixed inset-0 z-20 bg-ink/30 md:hidden" />}
@@ -436,7 +493,7 @@ export default function Home() {
           {active ? (
             <span className="truncate px-2 font-serif text-lg">{active.title}</span>
           ) : (
-            <Image src={logo} alt="Prompt KPI" height={24} loading="eager" />
+            <Logo className="h-6" />
           )}
           <button
             aria-label="New report"
@@ -450,10 +507,11 @@ export default function Home() {
         {messages.length === 0 ? (
           <main className="flex flex-1 flex-col items-center justify-center px-4 py-8">
             <div className="w-full max-w-[50rem]">
-              <h2 className="mb-9 text-center font-serif text-[2.5rem] leading-[1.07] font-medium tracking-[-0.025em] text-[#0f1720] md:text-[3.5rem]">
+              <h2 className="mb-9 text-center font-serif text-[2.5rem] leading-[1.07] font-medium tracking-[-0.025em] text-ink md:text-[3.5rem]">
                 What would you like
                 <br />
-                to <span className="bg-linear-to-r from-[#d6617a] to-[#7b5fc4] bg-clip-text text-transparent">report on?</span>
+                {/* runs the logo's gradient, deep → accent */}
+                to <span className="bg-linear-to-r from-primary via-tertiary to-secondary bg-clip-text text-transparent">report on?</span>
               </h2>
               {alert}
               {composer}

@@ -4,20 +4,59 @@
   /* DM Sans for UI and answers; Newsreader only for the empty-state heading */
   --font-sans: var(--font-dm-sans);
   --font-serif: var(--font-newsreader);
+
+  /* brand roles; inline so each utility reads the theme of the element it sits on (the picker swatches rely on it) */
+  --color-primary: var(--primary);
+  --color-primary-strong: color-mix(in oklab, var(--primary), var(--wordmark) 35%);
+  --color-primary-soft: color-mix(in oklab, var(--primary) 8%, var(--color-paper));
+  --color-tertiary: var(--tertiary);
+  --color-secondary: var(--secondary);
+  --color-wordmark: var(--wordmark);
+}
+
+/* themes, picked in the sidebar (ThemePicker in page.tsx). Each follows the logo's gradient:
+   primary (deep, buttons) → tertiary (mid) → secondary (bright accent); wordmark is the logo lettering.
+   Dusk is the logo's own art. Accents stay ≥3:1 on paper, primary ≥10:1 under paper text. */
+:root,
+[data-theme="dusk"] {
+  --wordmark: #010f40;
+  --primary: #142f83;
+  --tertiary: #65296f;
+  --secondary: #f04f70;
+}
+[data-theme="ocean"] {
+  --wordmark: #001b2d;
+  --primary: #00426c;
+  --tertiary: #00656e;
+  --secondary: #009680;
+}
+[data-theme="forest"] {
+  --wordmark: #051e12;
+  --primary: #124830;
+  --tertiary: #4c6429;
+  --secondary: #c47212;
+}
+[data-theme="ember"] {
+  --wordmark: #2e0a0c;
+  --primary: #611326;
+  --tertiary: #9a2b16;
+  --secondary: #d95800;
+}
+[data-theme="graphite"] {
+  --wordmark: #14181f;
+  --primary: #2d333d;
+  --tertiary: #4f5966;
+  --secondary: #657e90;
 }
 
 @theme {
-  /* warm paper neutrals; brand: navy #323c7a (primary), rose #cc485f (secondary) */
+  /* warm paper neutrals, shared by every theme */
   --color-paper: #fcfcfa;
   --color-sidebar: #f7f3ee;
   --color-surface: #fefefd;
   --color-line: #ebe5df;
   --color-ink: #111720;
   --color-muted: #73706c;
-  --color-primary: #323c7a;
-  --color-primary-strong: #262e60;
-  --color-primary-soft: oklch(0.94 0.018 275);
-  --color-secondary: #cc485f;
 
   --animate-rise: rise 280ms cubic-bezier(0.25, 1, 0.5, 1) both;
   --animate-travel: travel 1.1s linear infinite;
