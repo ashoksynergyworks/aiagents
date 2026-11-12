@@ -1,7 +1,16 @@
 "use client";
 
-import { memo, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
+import {
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import Link from "next/link";
 import Logo from "./Logo";
+import { logout } from "./login/actions";
 
 type CsvFile = { name: string; csv: string; rows: number };
 type Msg = {
@@ -15,7 +24,12 @@ type Msg = {
   stopped?: boolean;
 };
 type Chat = { id: string; title: string; messages: Msg[] };
-type DbStatus = { ok: boolean; db?: string; error?: string };
+type DbStatus = {
+  ok: boolean;
+  db?: string;
+  error?: string;
+  user?: { name: string; email: string; role: string };
+};
 
 async function checkDb(): Promise<DbStatus> {
   const s = await fetch("/api/chat")
@@ -28,12 +42,44 @@ async function checkDb(): Promise<DbStatus> {
 const ACCENT = "bg-secondary/10 text-secondary";
 const MID = "bg-tertiary/10 text-tertiary";
 const SUGGESTIONS = [
-  { label: "What needs attention", prompt: "What needs my attention this week?", icon: "chart", tone: ACCENT },
-  { label: "Monthly referrals", prompt: "How many referrals came in each month this year?", icon: "users", tone: MID },
-  { label: "Top specialist groups", prompt: "Top 10 specialist groups by referrals in the last 90 days", icon: "star", tone: ACCENT },
-  { label: "Office report (CSV)", prompt: "CSV of appointments created with each specialist office last month", icon: "file", tone: MID },
-  { label: "High-risk by PCP", prompt: "Which PCPs sent the most high-risk referrals?", icon: "alert", tone: ACCENT },
-  { label: "This month vs last", prompt: "Show me appointment analytics for this month compared with last month", icon: "trend", tone: MID },
+  {
+    label: "What needs attention",
+    prompt: "What needs my attention this week?",
+    icon: "chart",
+    tone: ACCENT,
+  },
+  {
+    label: "Monthly referrals",
+    prompt: "How many referrals came in each month this year?",
+    icon: "users",
+    tone: MID,
+  },
+  {
+    label: "Top specialist groups",
+    prompt: "Top 10 specialist groups by referrals in the last 90 days",
+    icon: "star",
+    tone: ACCENT,
+  },
+  {
+    label: "Office report (CSV)",
+    prompt:
+      "CSV of appointments created with each specialist office last month",
+    icon: "file",
+    tone: MID,
+  },
+  {
+    label: "High-risk by PCP",
+    prompt: "Which PCPs sent the most high-risk referrals?",
+    icon: "alert",
+    tone: ACCENT,
+  },
+  {
+    label: "This month vs last",
+    prompt:
+      "Show me appointment analytics for this month compared with last month",
+    icon: "trend",
+    tone: MID,
+  },
 ] as const;
 
 const CHIP =
@@ -41,7 +87,8 @@ const CHIP =
 
 const NUMERIC = /^-?[\d,.]+%?$/;
 // insight section labels the agent writes on their own line (route.ts system prompt)
-const LABEL = /^[\s*_#]*(key findings|growth opportunities|recommendation|follow\W?up questions)[\s*_:]*$/i;
+const LABEL =
+  /^[\s*_#]*(key findings|growth opportunities|recommendation|follow\W?up questions)[\s*_:]*$/i;
 
 const ICONS = {
   send: "M12 19V5M5 12l7-7 7 7",
@@ -53,25 +100,52 @@ const ICONS = {
   stop: "M7 7h10v10H7z",
   search: "m21 21-4.3-4.3M3 11a8 8 0 1 0 16 0 8 8 0 1 0-16 0",
   chart: "M4 20h16M7.5 16v-3M11 16V8M14.5 16v-5M18 16V6",
-  users: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M5 7a4 4 0 1 0 8 0 4 4 0 1 0-8 0M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75",
+  users:
+    "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M5 7a4 4 0 1 0 8 0 4 4 0 1 0-8 0M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75",
   star: "m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z",
   file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6",
-  alert: "M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01",
+  alert:
+    "M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01",
   trend: "m22 7-8.5 8.5-5-5L2 17M16 7h6v6",
 };
 
-function Icon({ name, className = "size-5" }: { name: keyof typeof ICONS; className?: string }) {
+function Icon({
+  name,
+  className = "size-5",
+}: {
+  name: keyof typeof ICONS;
+  className?: string;
+}) {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className={className}>
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={className}
+    >
       <path d={ICONS[name]} />
     </svg>
   );
 }
 
 // a referral: navy PCP dot handing off to a rose specialist dot; the arc runs while a query is in flight
-function Mark({ className = "", running = false }: { className?: string; running?: boolean }) {
+function Mark({
+  className = "",
+  running = false,
+}: {
+  className?: string;
+  running?: boolean;
+}) {
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true" className={`shrink-0 text-primary ${className}`}>
+    <svg
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      className={`shrink-0 text-primary ${className}`}
+    >
       <path
         d="M6 15C6 9.5 9.5 6 15 6"
         fill="none"
@@ -79,7 +153,9 @@ function Mark({ className = "", running = false }: { className?: string; running
         strokeWidth="2"
         strokeLinecap="round"
         strokeDasharray={running ? "4 3" : undefined}
-        className={running ? "animate-travel motion-reduce:animate-none" : undefined}
+        className={
+          running ? "animate-travel motion-reduce:animate-none" : undefined
+        }
       />
       <circle cx="6" cy="18" r="3" className="fill-primary" />
       <circle cx="18" cy="6" r="3" className="fill-secondary" />
@@ -104,7 +180,11 @@ function watchTheme(onChange: () => void) {
 }
 
 function ThemePicker() {
-  const theme = useSyncExternalStore(watchTheme, () => html().dataset.theme ?? "dusk", () => "dusk");
+  const theme = useSyncExternalStore(
+    watchTheme,
+    () => html().dataset.theme ?? "dusk",
+    () => "dusk",
+  );
   // dev only: Strict Mode's remount strips the attribute the inline script set, so put it back before paint
   useLayoutEffect(() => {
     const t = savedTheme();
@@ -121,7 +201,11 @@ function ThemePicker() {
       <span id="theme-label" className="font-semibold">
         Theme
       </span>
-      <div role="radiogroup" aria-labelledby="theme-label" className="flex gap-0.5">
+      <div
+        role="radiogroup"
+        aria-labelledby="theme-label"
+        className="flex gap-0.5"
+      >
         {THEMES.map((name) => {
           const t = name.toLowerCase();
           return (
@@ -132,8 +216,18 @@ function ThemePicker() {
               data-theme={t}
               className="grid size-8 cursor-pointer place-items-center rounded-full transition-colors duration-150 hover:bg-paper has-checked:ring-2 has-checked:ring-primary has-focus-visible:outline-3 has-focus-visible:outline-primary"
             >
-              <input type="radio" name="theme" value={t} checked={theme === t} onChange={() => pick(t)} className="sr-only" />
-              <span aria-hidden="true" className="size-5 rounded-full bg-linear-135 from-primary via-tertiary to-secondary" />
+              <input
+                type="radio"
+                name="theme"
+                value={t}
+                checked={theme === t}
+                onChange={() => pick(t)}
+                className="sr-only"
+              />
+              <span
+                aria-hidden="true"
+                className="size-5 rounded-full bg-linear-135 from-primary via-tertiary to-secondary"
+              />
               <span className="sr-only">{name}</span>
             </label>
           );
@@ -145,8 +239,13 @@ function ThemePicker() {
 
 function download(f: CsvFile) {
   // BOM so Excel reads UTF-8 names (e.g. "Hà Nội") correctly
-  const url = URL.createObjectURL(new Blob(["\uFEFF", f.csv], { type: "text/csv;charset=utf-8" }));
-  const a = Object.assign(document.createElement("a"), { href: url, download: f.name });
+  const url = URL.createObjectURL(
+    new Blob(["\uFEFF", f.csv], { type: "text/csv;charset=utf-8" }),
+  );
+  const a = Object.assign(document.createElement("a"), {
+    href: url,
+    download: f.name,
+  });
   a.click();
   setTimeout(() => URL.revokeObjectURL(url));
 }
@@ -154,9 +253,15 @@ function download(f: CsvFile) {
 // **key figure** → <strong>. Leftover markers touching a word (a pair still open mid-stream, *italics* the prompt
 // forbids) are dropped; a "* " bullet is kept.
 function bold(s: string) {
-  return s
-    .split(/\*\*(.+?)\*\*/g)
-    .map((part, i) => (i % 2 ? <strong key={i} className="font-semibold">{part}</strong> : part.replace(/(?<=\S)\*+|\*+(?=\S)/g, "")));
+  return s.split(/\*\*(.+?)\*\*/g).map((part, i) =>
+    i % 2 ? (
+      <strong key={i} className="font-semibold">
+        {part}
+      </strong>
+    ) : (
+      part.replace(/(?<=\S)\*+|\*+(?=\S)/g, "")
+    ),
+  );
 }
 
 // three dots pulsing in turn where the next words will land
@@ -164,7 +269,11 @@ function Typing() {
   return (
     <span aria-hidden="true" className="ml-1.5 inline-flex gap-1 align-middle">
       {[0, 1, 2].map((k) => (
-        <span key={k} style={{ animationDelay: `${k * 160}ms` }} className="size-1.5 animate-typing rounded-full bg-primary/30 motion-reduce:animate-none" />
+        <span
+          key={k}
+          style={{ animationDelay: `${k * 160}ms` }}
+          className="size-1.5 animate-typing rounded-full bg-primary/30 motion-reduce:animate-none"
+        />
       ))}
     </span>
   );
@@ -172,7 +281,13 @@ function Typing() {
 
 // ponytail: only markdown pipe tables and **bold** are parsed, the rest stays plain text; add react-markdown if replies need more
 // ponytail: memo only; batch deltas per animation frame if long chats still stutter while streaming
-const Reply = memo(function Reply({ text, streaming = false }: { text: string; streaming?: boolean }) {
+const Reply = memo(function Reply({
+  text,
+  streaming = false,
+}: {
+  text: string;
+  streaming?: boolean;
+}) {
   const blocks: (string | string[][] | { label: string })[] = [];
   for (const line of text.split("\n")) {
     const t = line.trim();
@@ -181,14 +296,18 @@ const Reply = memo(function Reply({ text, streaming = false }: { text: string; s
     if (t.startsWith("|")) {
       if (/^[|\s:-]+$/.test(t) && t.includes("---")) continue; // header separator row
       // tables carry their own emphasis (header, alignment), so bold markers are dropped in cells
-      const cells = t.replace(/^\||\|$/g, "").split("|").map((c) => c.replaceAll("**", "").trim());
+      const cells = t
+        .replace(/^\||\|$/g, "")
+        .split("|")
+        .map((c) => c.replaceAll("**", "").trim());
       if (Array.isArray(last)) last.push(cells);
       else blocks.push([cells]);
     } else if (LABEL.test(t)) {
       const label = t.replace(/[*_#:]/g, "").trim();
       if (streaming && /^follow/i.test(label)) break; // the server turns this section into chips at the end
       blocks.push({ label });
-    } else if (typeof last === "string") blocks[blocks.length - 1] = `${last}\n${line}`;
+    } else if (typeof last === "string")
+      blocks[blocks.length - 1] = `${last}\n${line}`;
     else blocks.push(line);
   }
   const end = blocks.at(-1);
@@ -211,14 +330,24 @@ const Reply = memo(function Reply({ text, streaming = false }: { text: string; s
       );
     const [head, ...body] = b;
     const settled = streaming ? body.slice(0, -1) : body; // a row still being written doesn't flip column alignment
-    const num = head.map((_, j) => settled.length > 0 && settled.every((r) => NUMERIC.test(r[j] ?? "")));
+    const num = head.map(
+      (_, j) =>
+        settled.length > 0 && settled.every((r) => NUMERIC.test(r[j] ?? "")),
+    );
     return (
-      <div key={i} className="overflow-x-auto rounded-xl border border-line bg-surface font-sans">
+      <div
+        key={i}
+        className="overflow-x-auto rounded-xl border border-line bg-surface font-sans"
+      >
         <table className="w-full text-sm">
           <thead className="bg-sidebar text-muted">
             <tr>
               {head.map((c, j) => (
-                <th key={j} scope="col" className={`px-4 py-2.5 font-medium whitespace-nowrap ${num[j] ? "text-right" : "text-left"}`}>
+                <th
+                  key={j}
+                  scope="col"
+                  className={`px-4 py-2.5 font-medium whitespace-nowrap ${num[j] ? "text-right" : "text-left"}`}
+                >
                   {c}
                 </th>
               ))}
@@ -228,7 +357,10 @@ const Reply = memo(function Reply({ text, streaming = false }: { text: string; s
             {body.map((r, k) => (
               <tr key={k}>
                 {head.map((_, j) => (
-                  <td key={j} className={`px-4 py-2.5 ${num[j] ? "text-right tabular-nums" : ""}`}>
+                  <td
+                    key={j}
+                    className={`px-4 py-2.5 ${num[j] ? "text-right tabular-nums" : ""}`}
+                  >
                     {r[j]}
                   </td>
                 ))}
@@ -239,7 +371,14 @@ const Reply = memo(function Reply({ text, streaming = false }: { text: string; s
       </div>
     );
   });
-  return streaming && !inline ? [...out, <p key="typing"><Typing /></p>] : out;
+  return streaming && !inline
+    ? [
+        ...out,
+        <p key="typing">
+          <Typing />
+        </p>,
+      ]
+    : out;
 });
 
 export default function Home() {
@@ -283,7 +422,9 @@ export default function Home() {
     const next: Msg[] = [...prev, { role: "user", content: text }];
     const put = (msgs: Msg[]) =>
       setChats((cs) =>
-        cs.some((c) => c.id === id) ? cs.map((c) => (c.id === id ? { ...c, messages: msgs } : c)) : [{ id, title: text, messages: msgs }, ...cs],
+        cs.some((c) => c.id === id)
+          ? cs.map((c) => (c.id === id ? { ...c, messages: msgs } : c))
+          : [{ id, title: text, messages: msgs }, ...cs],
       );
     put(next);
     setActiveId(id);
@@ -300,12 +441,18 @@ export default function Home() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: next.map(({ role, content }) => ({ role, content })) }), // CSVs stay client-side
+        body: JSON.stringify({
+          messages: next.map(({ role, content }) => ({ role, content })),
+        }), // CSVs stay client-side
         signal: ac.signal,
       });
-      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? "Request failed");
+      if (!res.ok)
+        throw new Error(
+          (await res.json().catch(() => ({}))).error ?? "Request failed",
+        );
       // NDJSON events from route.ts: status, delta, reset, done, error
-      let final: (Omit<Msg, "role" | "content"> & { reply: string }) | undefined;
+      let final:
+        (Omit<Msg, "role" | "content"> & { reply: string }) | undefined;
       let buf = "";
       const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader();
       for (let r = await reader.read(); !r.done; r = await reader.read()) {
@@ -316,7 +463,10 @@ export default function Home() {
           if (e.type === "status") setStatus(e.text);
           else if (e.type === "delta") {
             streamed += e.text;
-            put([...next, { role: "assistant", content: streamed, streaming: true }]);
+            put([
+              ...next,
+              { role: "assistant", content: streamed, streaming: true },
+            ]);
           } else if (e.type === "reset") {
             streamed = "";
             put(next);
@@ -324,15 +474,30 @@ export default function Home() {
           else if (e.type === "done") final = e;
         }
       }
-      if (!final) throw new Error("The connection dropped before the report finished. Try again.");
+      if (!final)
+        throw new Error(
+          "The connection dropped before the report finished. Try again.",
+        );
       const { reply, used, files, fallback, followUps } = final;
-      console.log("[chat] ←", `${Math.round(performance.now() - t0)}ms`, { used, files: files?.map((f) => `${f.name} (${f.rows} rows)`), fallback });
-      put([...next, { role: "assistant", content: reply, used, files, fallback, followUps }]);
+      console.log("[chat] ←", `${Math.round(performance.now() - t0)}ms`, {
+        used,
+        files: files?.map((f) => `${f.name} (${f.rows} rows)`),
+        fallback,
+      });
+      put([
+        ...next,
+        { role: "assistant", content: reply, used, files, fallback, followUps },
+      ]);
     } catch (e) {
       const stopped = (e as Error).name === "AbortError";
-      console[stopped ? "log" : "error"](stopped ? "[chat] stopped" : "[chat] failed", `${Math.round(performance.now() - t0)}ms`, e);
+      console[stopped ? "log" : "error"](
+        stopped ? "[chat] stopped" : "[chat] failed",
+        `${Math.round(performance.now() - t0)}ms`,
+        e,
+      );
       // a stopped answer keeps what it wrote; otherwise roll back so the question can be edited and re-sent
-      if (stopped && streamed) put([...next, { role: "assistant", content: streamed, stopped: true }]);
+      if (stopped && streamed)
+        put([...next, { role: "assistant", content: streamed, stopped: true }]);
       else {
         if (prev.length) put(prev);
         else setChats((cs) => cs.filter((c) => c.id !== id));
@@ -354,7 +519,10 @@ export default function Home() {
   }
 
   const alert = error && (
-    <p role="alert" className="mb-3 rounded-xl border border-secondary/30 bg-secondary/8 px-4 py-2.5 text-sm">
+    <p
+      role="alert"
+      className="mb-3 rounded-xl border border-secondary/30 bg-secondary/8 px-4 py-2.5 text-sm"
+    >
       {error}
     </p>
   );
@@ -422,10 +590,15 @@ export default function Home() {
             New report
           </button>
         </div>
-        <nav aria-label="Recent reports" className="mx-5 mt-6 flex-1 overflow-y-auto border-t border-line pt-6">
+        <nav
+          aria-label="Recent reports"
+          className="mx-5 mt-6 flex-1 overflow-y-auto border-t border-line pt-6"
+        >
           <p className="px-2 pb-3 text-sm font-semibold text-muted">Recents</p>
           {chats.length === 0 ? (
-            <p className="px-2 text-sm leading-relaxed text-muted">Reports you run in this tab show up here.</p>
+            <p className="px-2 text-sm leading-relaxed text-muted">
+              Reports you run in this tab show up here.
+            </p>
           ) : (
             <ul className="space-y-0.5">
               {chats.map((c) => (
@@ -448,9 +621,46 @@ export default function Home() {
           )}
         </nav>
         <div className="space-y-2 border-t border-line px-5 py-3 text-xs text-muted">
+          {db?.user && (
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-2 pb-1">
+              <span className="grid size-8 shrink-0 place-items-center rounded-full bg-linear-to-br from-primary to-tertiary text-[11px] font-semibold text-paper">
+                {db.user.name
+                  .split(" ")
+                  .map((p) => p[0])
+                  .join("")}
+              </span>
+              <span className="min-w-0 flex-1 basis-32">
+                <span className="block truncate text-sm font-medium text-ink">
+                  {db.user.name}
+                </span>
+                <span className="block truncate">
+                  {db.user.role === "super_admin"
+                    ? "Super admin"
+                    : db.user.role}
+                </span>
+              </span>
+              <span className="flex w-full gap-2">
+                {db.user.role === "super_admin" && (
+                  <Link
+                    href="/users"
+                    className="grid min-h-8 flex-1 place-items-center rounded-lg border border-line px-2.5 font-medium text-ink/80 transition-colors duration-150 hover:bg-paper focus-visible:outline-3 focus-visible:outline-primary"
+                  >
+                    Users
+                  </Link>
+                )}
+                <form action={logout} className="flex flex-1">
+                  <button className="min-h-8 flex-1 cursor-pointer rounded-lg border border-line px-2.5 font-medium text-ink/80 transition-colors duration-150 hover:bg-paper focus-visible:outline-3 focus-visible:outline-primary">
+                    Sign out
+                  </button>
+                </form>
+              </span>
+            </div>
+          )}
           <ThemePicker />
           <div className="flex items-center gap-2">
-            <span className={`size-1.5 shrink-0 rounded-full ${!db ? "animate-pulse bg-muted" : db.ok ? "bg-primary" : "bg-secondary"}`} />
+            <span
+              className={`size-1.5 shrink-0 rounded-full ${!db ? "animate-pulse bg-muted" : db.ok ? "bg-primary" : "bg-secondary"}`}
+            />
             <span role="status" className="min-w-0 flex-1 truncate">
               {!db ? (
                 "Checking database…"
@@ -474,10 +684,20 @@ export default function Home() {
             </button>
           </div>
           {/* ink, not the accent: accents are only ≥3:1, too faint for small text */}
-          {db?.error && <p className="mt-1.5 line-clamp-3 wrap-break-word text-ink/80">{db.error}</p>}
+          {db?.error && (
+            <p className="mt-1.5 line-clamp-3 wrap-break-word text-ink/80">
+              {db.error}
+            </p>
+          )}
         </div>
       </aside>
-      {menu && <button aria-label="Close menu" onClick={() => setMenu(false)} className="fixed inset-0 z-20 bg-ink/30 md:hidden" />}
+      {menu && (
+        <button
+          aria-label="Close menu"
+          onClick={() => setMenu(false)}
+          className="fixed inset-0 z-20 bg-ink/30 md:hidden"
+        />
+      )}
 
       <div className="flex min-w-0 flex-1 flex-col">
         <h1 className="sr-only">Prompt KPI</h1>
@@ -491,7 +711,9 @@ export default function Home() {
             <Icon name="menu" />
           </button>
           {active ? (
-            <span className="truncate px-2 font-serif text-lg">{active.title}</span>
+            <span className="truncate px-2 font-serif text-lg">
+              {active.title}
+            </span>
           ) : (
             <Logo className="h-6" />
           )}
@@ -511,14 +733,24 @@ export default function Home() {
                 What would you like
                 <br />
                 {/* runs the logo's gradient, deep → accent */}
-                to <span className="bg-linear-to-r from-primary via-tertiary to-secondary bg-clip-text text-transparent">report on?</span>
+                to{" "}
+                <span className="bg-linear-to-r from-primary via-tertiary to-secondary bg-clip-text text-transparent">
+                  report on?
+                </span>
               </h2>
               {alert}
               {composer}
               <div className="mt-8 flex flex-wrap justify-center gap-x-4.5 gap-y-3">
                 {SUGGESTIONS.map((s) => (
-                  <button key={s.label} onClick={() => send(s.prompt)} title={s.prompt} className={`${CHIP} flex items-center gap-4 py-2 pr-5 pl-3`}>
-                    <span className={`grid size-9 place-items-center rounded-full ${s.tone}`}>
+                  <button
+                    key={s.label}
+                    onClick={() => send(s.prompt)}
+                    title={s.prompt}
+                    className={`${CHIP} flex items-center gap-4 py-2 pr-5 pl-3`}
+                  >
+                    <span
+                      className={`grid size-9 place-items-center rounded-full ${s.tone}`}
+                    >
                       <Icon name={s.icon} className="size-4.5" />
                     </span>
                     {s.label}
@@ -534,64 +766,102 @@ export default function Home() {
               aria-live="polite"
               onScroll={(e) => {
                 const el = e.currentTarget;
-                stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+                stick.current =
+                  el.scrollHeight - el.scrollTop - el.clientHeight < 80;
               }}
               className="flex-1 overflow-y-auto"
             >
               <div className="mx-auto max-w-3xl space-y-8 px-4 py-8 md:py-10">
                 {messages.map((m, i) =>
                   m.role === "user" ? (
-                    <div key={i} className="flex animate-rise justify-end motion-reduce:animate-none">
-                      <p className="max-w-[85%] rounded-2xl bg-primary-soft px-4 py-2.5 whitespace-pre-wrap">{m.content}</p>
+                    <div
+                      key={i}
+                      className="flex animate-rise justify-end motion-reduce:animate-none"
+                    >
+                      <p className="max-w-[85%] rounded-2xl bg-primary-soft px-4 py-2.5 whitespace-pre-wrap">
+                        {m.content}
+                      </p>
                     </div>
                   ) : (
                     // aria-busy: screen readers read the answer once it is complete, not token by token
-                    <article key={i} aria-busy={m.streaming || undefined} className="animate-rise motion-reduce:animate-none">
+                    <article
+                      key={i}
+                      aria-busy={m.streaming || undefined}
+                      className="animate-rise motion-reduce:animate-none"
+                    >
                       <div className="space-y-3 text-base leading-7">
                         <Reply text={m.content} streaming={m.streaming} />
                       </div>
                       {!m.streaming && (
                         <>
-                        {m.files?.map((f) => (
-                          <button
-                            key={f.name}
-                            onClick={() => download(f)}
-                            aria-label={`Download ${f.name}`}
-                            className="group mt-4 flex w-full max-w-md cursor-pointer items-center gap-3 rounded-xl border border-line bg-surface p-3 text-left transition-colors duration-150 hover:border-primary/40 focus-visible:outline-3 focus-visible:outline-primary"
-                          >
-                            <span className="grid size-10 shrink-0 place-items-center rounded-lg bg-primary-soft text-[0.6875rem] font-semibold tracking-wide text-primary">CSV</span>
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate text-sm font-medium">{f.name}</span>
-                              <span className="block text-xs text-muted">
-                                {f.rows.toLocaleString()} {f.rows === 1 ? "row" : "rows"}
+                          {m.files?.map((f) => (
+                            <button
+                              key={f.name}
+                              onClick={() => download(f)}
+                              aria-label={`Download ${f.name}`}
+                              className="group mt-4 flex w-full max-w-md cursor-pointer items-center gap-3 rounded-xl border border-line bg-surface p-3 text-left transition-colors duration-150 hover:border-primary/40 focus-visible:outline-3 focus-visible:outline-primary"
+                            >
+                              <span className="grid size-10 shrink-0 place-items-center rounded-lg bg-primary-soft text-[0.6875rem] font-semibold tracking-wide text-primary">
+                                CSV
                               </span>
-                            </span>
-                            <span className="grid size-9 shrink-0 place-items-center rounded-lg text-muted transition-colors duration-150 group-hover:bg-primary group-hover:text-paper">
-                              <Icon name="download" className="size-4" />
-                            </span>
-                          </button>
-                        ))}
-                        <div className="mt-2 flex items-center gap-2 text-xs text-muted">
-                          <button
-                            onClick={() => copy(i, m.content.replaceAll("**", ""))}
-                            aria-label={copied === i ? "Copied" : "Copy reply"}
-                            className="-ml-2 grid size-9 cursor-pointer place-items-center rounded-lg transition-colors duration-150 hover:bg-sidebar hover:text-ink focus-visible:outline-3 focus-visible:outline-primary"
-                          >
-                            <Icon name={copied === i ? "check" : "copy"} className="size-4" />
-                          </button>
-                          {!!m.used?.length && <span>Queried {m.used.join(", ")}</span>}
-                          {m.fallback && <span>· answered by fallback model {m.fallback}</span>}
-                          {m.stopped && <span>· Stopped</span>}
-                        </div>
-                        {i === messages.length - 1 && !!m.followUps?.length && (
-                          <div role="group" aria-label="Follow-up questions" className="mt-3 flex flex-wrap gap-2">
-                            {m.followUps.map((q) => (
-                              <button key={q} onClick={() => send(q)} disabled={!!loading} className={`${CHIP} px-3.5 py-2 text-left disabled:cursor-wait disabled:opacity-50`}>
-                                {q}
-                              </button>
-                            ))}
+                              <span className="min-w-0 flex-1">
+                                <span className="block truncate text-sm font-medium">
+                                  {f.name}
+                                </span>
+                                <span className="block text-xs text-muted">
+                                  {f.rows.toLocaleString()}{" "}
+                                  {f.rows === 1 ? "row" : "rows"}
+                                </span>
+                              </span>
+                              <span className="grid size-9 shrink-0 place-items-center rounded-lg text-muted transition-colors duration-150 group-hover:bg-primary group-hover:text-paper">
+                                <Icon name="download" className="size-4" />
+                              </span>
+                            </button>
+                          ))}
+                          <div className="mt-2 flex items-center gap-2 text-xs text-muted">
+                            <button
+                              onClick={() =>
+                                copy(i, m.content.replaceAll("**", ""))
+                              }
+                              aria-label={
+                                copied === i ? "Copied" : "Copy reply"
+                              }
+                              className="-ml-2 grid size-9 cursor-pointer place-items-center rounded-lg transition-colors duration-150 hover:bg-sidebar hover:text-ink focus-visible:outline-3 focus-visible:outline-primary"
+                            >
+                              <Icon
+                                name={copied === i ? "check" : "copy"}
+                                className="size-4"
+                              />
+                            </button>
+                            {!!m.used?.length && (
+                              <span>Queried {m.used.join(", ")}</span>
+                            )}
+                            {m.fallback && (
+                              <span>
+                                · answered by fallback model {m.fallback}
+                              </span>
+                            )}
+                            {m.stopped && <span>· Stopped</span>}
                           </div>
-                        )}
+                          {i === messages.length - 1 &&
+                            !!m.followUps?.length && (
+                              <div
+                                role="group"
+                                aria-label="Follow-up questions"
+                                className="mt-3 flex flex-wrap gap-2"
+                              >
+                                {m.followUps.map((q) => (
+                                  <button
+                                    key={q}
+                                    onClick={() => send(q)}
+                                    disabled={!!loading}
+                                    className={`${CHIP} px-3.5 py-2 text-left disabled:cursor-wait disabled:opacity-50`}
+                                  >
+                                    {q}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
                         </>
                       )}
                     </article>
@@ -604,7 +874,10 @@ export default function Home() {
                       Writing the report
                     </p>
                   ) : (
-                    <p role="status" className="flex items-center gap-3 text-sm text-muted">
+                    <p
+                      role="status"
+                      className="flex items-center gap-3 text-sm text-muted"
+                    >
                       <Mark running className="size-7" />
                       {`${status || "Running queries"}. Reports can take up to a minute.`}
                     </p>
@@ -615,7 +888,10 @@ export default function Home() {
             <div className="mx-auto w-full max-w-3xl px-4 pb-3">
               {alert}
               {composer}
-              <p className="mt-2 text-center text-xs text-muted">Answers come from live dev data and can be wrong. Check the numbers before you share them.</p>
+              <p className="mt-2 text-center text-xs text-muted">
+                Answers come from live dev data and can be wrong. Check the
+                numbers before you share them.
+              </p>
             </div>
           </>
         )}
@@ -624,7 +900,10 @@ export default function Home() {
           <span role="img" aria-label="love">
             ❤️
           </span>{" "}
-          by <span className="font-medium text-ink/80">SynergyWorks Solutions LLP</span>
+          by{" "}
+          <span className="font-medium text-ink/80">
+            SynergyWorks Solutions LLP
+          </span>
         </footer>
       </div>
     </div>

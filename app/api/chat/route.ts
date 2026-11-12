@@ -5,6 +5,7 @@ import { connection } from "next/server";
 import { COLLECTIONS, parsePipeline, splitFollowUps, strip, toCsv } from "./guard";
 import { KPI_BY, kpiQuery } from "./kpis";
 import { complete, ContentFilteredError, DEFAULT_MODELS, parseModels, TOOL_NAMES } from "./model";
+import { currentUser } from "../../auth";
 
 // ponytail: cached on globalThis so dev hot-reloads don't open a new pool each time
 const g = globalThis as unknown as { mongo?: MongoClient };
@@ -157,20 +158,23 @@ async function aggregate({ collection, pipeline }: Args, limit: number) {
 // DB status for the sidebar; connect() revives a closed client, so the same call is the retry
 export async function GET() {
   await connection(); // never prerender a health check
+  const user = await currentUser(); // proxy.ts already checks; this is the second lock and tells the UI who is signed in
+  if (!user) return Response.json({ ok: false, error: "Please sign in again." }, { status: 401 });
   const t = Date.now();
   try {
     await mongo.connect();
     await db.command({ ping: 1 });
     console.log("[db] ping ok", db.databaseName, `${Date.now() - t}ms`);
-    return Response.json({ ok: true, db: db.databaseName });
+    return Response.json({ ok: true, db: db.databaseName, user });
   } catch (e) {
     console.error("[db] ping failed", `${Date.now() - t}ms`, (e as Error).message);
-    return Response.json({ ok: false, db: db.databaseName, error: (e as Error).message }, { status: 503 });
+    return Response.json({ ok: false, db: db.databaseName, user, error: (e as Error).message }, { status: 503 });
   }
 }
 
 export async function POST(req: Request) {
   // short id so interleaved requests can be told apart in the terminal
+  if (!(await currentUser())) return Response.json({ error: "Please sign in again." }, { status: 401 });
   const tag = `[chat ${crypto.randomUUID().slice(0, 8)}]`;
   const t0 = Date.now();
   if (!MODELS.length) return Response.json({ error: "No usable model. Set LLM_MODELS and the matching API keys in .env, then restart the server." }, { status: 500 });
