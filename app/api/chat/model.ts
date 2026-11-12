@@ -161,7 +161,8 @@ async function readSse(res: Response, onDelta: (text: string) => void) {
   return build();
 }
 
-type Hooks = { onDelta?: (text: string) => void; onReset?: () => void; signal?: AbortSignal };
+// body: extra request fields (e.g. response_format); they override the defaults
+type Hooks = { onDelta?: (text: string) => void; onReset?: () => void; signal?: AbortSignal; body?: object };
 
 // Tries the current model, then the rest of the list wrapping around. Each gets the same messages, so whichever
 // model picks the request up continues from the queries already run. Models in cooldown are skipped unless all are.
@@ -188,7 +189,7 @@ export async function complete(messages: object[], tools: object[], models: read
           headers: { "Content-Type": "application/json", ...(m.key && { Authorization: `Bearer ${m.key}` }) },
           // Reasoning models use part of the token budget for thinking.
           // ponytail: no stream_options (some servers reject unknown params), so usage is logged only when sent in-stream
-          body: JSON.stringify({ model: m.name, messages, tools, temperature: 0.2, max_tokens: 4096, stream: true }),
+          body: JSON.stringify({ model: m.name, messages, ...(tools.length && { tools }), temperature: 0.2, max_tokens: 4096, stream: true, ...hooks.body }),
           signal: AbortSignal.any([AbortSignal.timeout(m.timeout), ...(hooks.signal ? [hooks.signal] : [])]),
         });
         if (res.status === 429) limited.push(i);

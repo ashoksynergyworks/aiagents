@@ -2,6 +2,7 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { currentUser, listUsers, type Role } from "../auth";
 import Logo from "../Logo";
+import AddUser from "./AddUser";
 
 // per-user page behind auth: nothing to prerender, so block until the session is read
 export const instant = false;
@@ -15,7 +16,7 @@ const ROLE: Record<Role, { label: string; tone: string }> = {
 export default async function Users() {
   const me = await currentUser();
   if (me?.role !== "super_admin") redirect("/");
-  const users = listUsers();
+  const users = await listUsers();
 
   return (
     <div className="min-h-dvh bg-paper">
@@ -30,6 +31,7 @@ export default async function Users() {
         <p className="mt-1.5 text-[15px] text-muted">
           {users.length} people can sign in. Only super admins can see this page.
         </p>
+        <AddUser />
         <ul className="mt-8 divide-y divide-line overflow-hidden rounded-2xl border border-line bg-surface">
           {users.map((u) => (
             <li key={u.email} className="flex items-center gap-4 px-5 py-4">
@@ -37,7 +39,8 @@ export default async function Users() {
                 {u.name
                   .split(" ")
                   .map((p) => p[0])
-                  .join("")}
+                  .join("")
+                  .slice(0, 2)}
               </span>
               <span className="min-w-0 flex-1">
                 <span className="block font-medium">

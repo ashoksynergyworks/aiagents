@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "seed": "node --env-file=.env scripts/seed.mjs",
-    "test": "node --experimental-strip-types --no-warnings scripts/check-guard.mjs && node --experimental-strip-types --no-warnings scripts/check-kpis.mjs && node --experimental-strip-types --no-warnings scripts/check-model.mjs && node --experimental-strip-types --no-warnings scripts/check-auth.mjs",
+    "test": "node --experimental-strip-types --no-warnings scripts/check-guard.mjs && node --experimental-strip-types --no-warnings scripts/check-kpis.mjs && node --experimental-strip-types --no-warnings scripts/check-model.mjs && node --experimental-strip-types --no-warnings scripts/check-auth.mjs && node --experimental-strip-types --no-warnings scripts/check-standardise.mjs",
     "test:phi": "node --env-file=.env --experimental-strip-types --no-warnings scripts/check-phi.mjs"
   },
   "dependencies": {
@@ -16,7 +16,8 @@
     "next": "16.4.3",
     "openai": "^7.30.0",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",

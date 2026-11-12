@@ -1,15 +1,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { BSON, MongoClient } from "mongodb";
+import { BSON } from "mongodb";
 import { connection } from "next/server";
 import { COLLECTIONS, parsePipeline, splitFollowUps, strip, toCsv } from "./guard";
 import { KPI_BY, kpiQuery } from "./kpis";
 import { complete, ContentFilteredError, DEFAULT_MODELS, parseModels, TOOL_NAMES } from "./model";
 import { currentUser } from "../../auth";
+import { mongo } from "../../db";
 
-// ponytail: cached on globalThis so dev hot-reloads don't open a new pool each time
-const g = globalThis as unknown as { mongo?: MongoClient };
-const mongo = (g.mongo ??= new MongoClient(process.env.MONGODB_URI || "mongodb://localhost:27017/df-dev"));
 // pinned, not taken from the URI: Atlas connection strings carry no db name, so the driver silently fell back to an empty "test"
 // ponytail: tied to docs/df-dev-schema.md below; another DB needs its own schema doc too
 const db = mongo.db("df-dev");
@@ -160,6 +158,7 @@ export async function GET() {
   await connection(); // never prerender a health check
   const user = await currentUser(); // proxy.ts already checks; this is the second lock and tells the UI who is signed in
   if (!user) return Response.json({ ok: false, error: "Please sign in again." }, { status: 401 });
+  if (user.role !== "super_admin") return Response.json({ ok: false, error: "Only super admins can use this chat." }, { status: 403 });
   const t = Date.now();
   try {
     await mongo.connect();
@@ -174,7 +173,10 @@ export async function GET() {
 
 export async function POST(req: Request) {
   // short id so interleaved requests can be told apart in the terminal
-  if (!(await currentUser())) return Response.json({ error: "Please sign in again." }, { status: 401 });
+  const user = await currentUser();
+  if (!user) return Response.json({ error: "Please sign in again." }, { status: 401 });
+  // df-dev is for super admins only; workspace chat will pass a workspaceId (docs/workspaces-plan.md 3.8)
+  if (user.role !== "super_admin") return Response.json({ error: "Only super admins can use this chat." }, { status: 403 });
   const tag = `[chat ${crypto.randomUUID().slice(0, 8)}]`;
   const t0 = Date.now();
   if (!MODELS.length) return Response.json({ error: "No usable model. Set LLM_MODELS and the matching API keys in .env, then restart the server." }, { status: 500 });
