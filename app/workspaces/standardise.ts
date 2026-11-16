@@ -183,7 +183,9 @@ export function standardise(raw: unknown[][], input: unknown): Result {
   const h = plan.headerRow;
   if (h > 0) changes.push(`Skipped ${plural(h, "row")} above the column names`);
 
-  const drop = new Set(plan.dropRows);
+  // a plan that drops most rows has misread the sheet (e.g. a list of questions taken for notes): keep the rows
+  const bodySize = grid.length - h - 1;
+  const drop = new Set(bodySize >= 4 && plan.dropRows.length > bodySize / 2 ? [] : plan.dropRows);
   // notes under the table: trailing rows with one filled cell (only when the table is 3+ columns wide)
   const filledCells = (r: Cell[]) => r.filter((c) => !emptyish(c)).length;
   let end = grid.length;
@@ -191,7 +193,9 @@ export function standardise(raw: unknown[][], input: unknown): Result {
   for (let i = end; i < grid.length; i++) drop.add(i);
   let dropped = 0;
   const body = grid.slice(h + 1).filter((r, i) => {
-    const out = drop.has(h + 1 + i) || TOTAL.test(String(r.find((c) => !blank(c)) ?? "")) || r.every(emptyish);
+    // a total row has a number in it; "Total sales in May?" in a text-only row is data
+    const total = TOTAL.test(String(r.find((c) => !blank(c)) ?? "")) && r.some((c) => typeof c === "number" || typeof toNumber(c) === "number");
+    const out = drop.has(h + 1 + i) || total || r.every(emptyish);
     if (out) dropped++;
     return !out;
   });

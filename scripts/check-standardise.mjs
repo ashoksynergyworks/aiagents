@@ -75,6 +75,12 @@ assert.equal(evil.columns[0].key, "where_x");
 const cleanSheet = [["Name", "When", "Amount", "Ok"], ["A", new Date(Date.UTC(2026, 0, 2)), 5, true], ["B", new Date(Date.UTC(2026, 0, 3)), 7, false]];
 assert.deepEqual(standardise(cleanSheet, null).changes, []);
 
+// a text-only Q&A sheet: questions that start with "Total" are data, and a plan that drops every row is ignored
+const qa = [["Question", "ExpectedAnswer"], ...Array.from({ length: 20 }, (_, i) => [i % 2 ? `Total sales in month ${i}?` : `Which rep sold most in ${i}?`, `Answer ${i}`])];
+assert.equal(standardise(qa, null).rows.length, 20);
+assert.equal(standardise(qa, { headerRow: 0, dropRows: [...Array(20).keys()].map((i) => i + 1), columns: [] }).rows.length, 20);
+assert.equal(standardise([["Item", "Qty"], ["A", 2], ["Total", 2]], null).rows.length, 1); // a real total row still goes
+
 assert.equal(toNumber("0.5"), 0.5);
 assert.equal(toNumber("007"), undefined);
 assert.equal(toNumber("1,2"), undefined);

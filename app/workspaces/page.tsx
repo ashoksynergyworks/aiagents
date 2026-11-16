@@ -33,7 +33,7 @@ export default async function Workspaces() {
                 >
                   <span className="block font-serif text-xl">{w.name}</span>
                   <span className="mt-2 block text-sm text-muted">
-                    {w.tables.length ? `${w.tables.length} ${w.tables.length === 1 ? "table" : "tables"} · ${n(rows)} rows` : "No data yet · Upload a file →"}
+                    {w.tables.length ? `${w.tables.length} ${w.tables.length === 1 ? "table" : "tables"} · ${n(rows)} rows · Ask questions →` : "No data yet · Upload a file →"}
                   </span>
                 </Link>
               </li>

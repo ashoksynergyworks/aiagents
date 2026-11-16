@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type ReactNode,
 } from "react";
 import Link from "next/link";
 import Logo from "./Logo";
@@ -31,8 +32,18 @@ type DbStatus = {
   user?: { name: string; email: string; role: string };
 };
 
-async function checkDb(): Promise<DbStatus> {
-  const s = await fetch("/api/chat")
+// a workspace chat reads that workspace's database; no workspace is the df-dev chat
+export type Space = {
+  id: string;
+  name: string;
+  tables: string[];
+  starters: string[];
+};
+
+async function checkDb(workspaceId?: string): Promise<DbStatus> {
+  const s = await fetch(
+    workspaceId ? `/api/chat?workspaceId=${workspaceId}` : "/api/chat",
+  )
     .then((r) => r.json())
     .catch((e: Error) => ({ ok: false, error: e.message }));
   console.log("[db]", s);
@@ -381,7 +392,16 @@ const Reply = memo(function Reply({
     : out;
 });
 
-export default function Chat() {
+// nav: extra sidebar section (the workspace switcher); children: shown in place of the chat (upload, questions)
+export default function Chat({
+  workspace,
+  nav,
+  children,
+}: {
+  workspace?: Space;
+  nav?: ReactNode;
+  children?: ReactNode;
+}) {
   // ponytail: recents live in memory for this tab; persist to localStorage if people want them across reloads
   const [chats, setChats] = useState<Chat[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -396,9 +416,18 @@ export default function Chat() {
   const endRef = useRef<HTMLDivElement>(null);
   const stick = useRef(true); // follow new text only while the reader is at the bottom
 
+  const wsId = workspace?.id;
   useEffect(() => {
-    checkDb().then(setDb);
-  }, []);
+    checkDb(wsId).then(setDb);
+  }, [wsId]);
+  const suggestions = workspace
+    ? workspace.starters.map((prompt, i) => ({
+        label: prompt,
+        prompt,
+        icon: (["chart", "trend", "search", "file"] as const)[i % 4],
+        tone: i % 2 ? MID : ACCENT,
+      }))
+    : SUGGESTIONS;
 
   const active = chats.find((c) => c.id === activeId);
   const messages = active?.messages ?? [];
@@ -443,6 +472,7 @@ export default function Chat() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messages: next.map(({ role, content }) => ({ role, content })),
+          workspaceId: wsId,
         }), // CSVs stay client-side
         signal: ac.signal,
       });
@@ -555,7 +585,11 @@ export default function Chat() {
             send(input);
           }
         }}
-        placeholder="Ask for a report, e.g. referrals per specialist group last month ."
+        placeholder={
+          workspace
+            ? `Ask about ${workspace.tables.length === 1 ? workspace.tables[0] : "your data"}, e.g. ${workspace.starters[0] ?? "what stands out?"}`
+            : "Ask for a report, e.g. referrals per specialist group last month ."
+        }
         className="block max-h-60 min-h-12 min-w-0 flex-1 resize-none bg-transparent py-3 text-base leading-6 outline-none field-sizing-content placeholder:text-muted"
       />
       {/* while this chat's report runs, Send becomes Stop */}
@@ -572,24 +606,27 @@ export default function Chat() {
   );
 
   return (
-    <div className="flex h-dvh">
+    <div className="flex h-dvh bg-paper">
       <aside
         className={`${menu ? "fixed inset-y-0 left-0 z-30 flex" : "hidden"} w-72 flex-col border-r border-line bg-sidebar md:static md:flex md:w-64`}
       >
-        <div className="px-7 pt-8 pb-10">
+        <div className={`px-7 pt-8 ${nav ? "pb-6" : "pb-10"}`}>
           <Logo className="h-7" />
         </div>
-        <div className="px-5">
-          <button
-            onClick={newChat}
-            className="flex min-h-17 w-full cursor-pointer items-center gap-4.5 rounded-3xl bg-secondary/8 px-3 text-[15px] font-semibold shadow-[0_6px_20px_-10px_color-mix(in_oklab,var(--secondary)_25%,transparent)] transition-colors duration-150 hover:bg-secondary/12 focus-visible:outline-3 focus-visible:outline-primary"
-          >
-            <span className="grid size-11 place-items-center rounded-full bg-linear-to-b from-secondary to-[color-mix(in_oklab,var(--secondary),var(--tertiary)_15%)] text-paper shadow-[0_4px_10px_-4px_color-mix(in_oklab,var(--secondary)_60%,transparent)]">
-              <Icon name="plus" className="size-5" />
-            </span>
-            New report
-          </button>
-        </div>
+        {nav}
+        {!children && (
+          <div className="px-5">
+            <button
+              onClick={newChat}
+              className="flex min-h-17 w-full cursor-pointer items-center gap-4.5 rounded-3xl bg-secondary/8 px-3 text-[15px] font-semibold shadow-[0_6px_20px_-10px_color-mix(in_oklab,var(--secondary)_25%,transparent)] transition-colors duration-150 hover:bg-secondary/12 focus-visible:outline-3 focus-visible:outline-primary"
+            >
+              <span className="grid size-11 place-items-center rounded-full bg-linear-to-b from-secondary to-[color-mix(in_oklab,var(--secondary),var(--tertiary)_15%)] text-paper shadow-[0_4px_10px_-4px_color-mix(in_oklab,var(--secondary)_60%,transparent)]">
+                <Icon name="plus" className="size-5" />
+              </span>
+              {workspace ? "New chat" : "New report"}
+            </button>
+          </div>
+        )}
         <nav
           aria-label="Recent reports"
           className="mx-5 mt-6 flex-1 overflow-y-auto border-t border-line pt-6"
@@ -640,6 +677,14 @@ export default function Chat() {
                 </span>
               </span>
               <span className="flex w-full gap-2">
+                {workspace && db.user.role === "super_admin" && (
+                  <Link
+                    href="/"
+                    className="grid min-h-8 flex-1 place-items-center rounded-lg border border-line px-2.5 font-medium text-ink/80 transition-colors duration-150 hover:bg-paper focus-visible:outline-3 focus-visible:outline-primary"
+                  >
+                    Referral chat
+                  </Link>
+                )}
                 {db.user.role === "super_admin" && (
                   <Link
                     href="/users"
@@ -675,7 +720,7 @@ export default function Chat() {
             <button
               onClick={() => {
                 setDb(null);
-                checkDb().then(setDb);
+                checkDb(wsId).then(setDb);
               }}
               disabled={!db}
               className="min-h-8 cursor-pointer rounded-lg border border-line px-2.5 font-medium text-ink/80 transition-colors duration-150 hover:bg-paper focus-visible:outline-3 focus-visible:outline-primary disabled:cursor-wait disabled:opacity-50"
@@ -700,7 +745,9 @@ export default function Chat() {
       )}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <h1 className="sr-only">Prompt KPI</h1>
+        <h1 className="sr-only">
+          {workspace ? `${workspace.name} chat` : "Prompt KPI"}
+        </h1>
         <header className="flex items-center justify-between border-b border-line px-1 md:hidden">
           <button
             aria-label="Open menu"
@@ -710,9 +757,9 @@ export default function Chat() {
           >
             <Icon name="menu" />
           </button>
-          {active ? (
+          {active || workspace ? (
             <span className="truncate px-2 font-serif text-lg">
-              {active.title}
+              {active?.title ?? workspace?.name}
             </span>
           ) : (
             <Logo className="h-6" />
@@ -726,22 +773,35 @@ export default function Chat() {
           </button>
         </header>
 
-        {messages.length === 0 ? (
+        {children ? (
+          children
+        ) : messages.length === 0 ? (
           <main className="flex flex-1 flex-col items-center justify-center px-4 py-8">
             <div className="w-full max-w-[50rem]">
               <h2 className="mb-9 text-center font-serif text-[2.5rem] leading-[1.07] font-medium tracking-[-0.025em] text-ink md:text-[3.5rem]">
-                What would you like
-                <br />
-                {/* runs the logo's gradient, deep → accent */}
-                to{" "}
-                <span className="bg-linear-to-r from-primary via-tertiary to-secondary bg-clip-text text-transparent">
-                  report on?
-                </span>
+                {workspace ? (
+                  <>
+                    What do you want
+                    <br />
+                    to know about{" "}
+                    <span className="text-primary">{workspace.name}?</span>
+                  </>
+                ) : (
+                  <>
+                    What would you like
+                    <br />
+                    {/* runs the logo's gradient, deep → accent */}
+                    to{" "}
+                    <span className="bg-linear-to-r from-primary via-tertiary to-secondary bg-clip-text text-transparent">
+                      report on?
+                    </span>
+                  </>
+                )}
               </h2>
               {alert}
               {composer}
               <div className="mt-8 flex flex-wrap justify-center gap-x-4.5 gap-y-3">
-                {SUGGESTIONS.map((s) => (
+                {suggestions.map((s) => (
                   <button
                     key={s.label}
                     onClick={() => send(s.prompt)}
@@ -889,8 +949,9 @@ export default function Chat() {
               {alert}
               {composer}
               <p className="mt-2 text-center text-xs text-muted">
-                Answers come from live dev data and can be wrong. Check the
-                numbers before you share them.
+                {workspace
+                  ? "Answers come from your uploaded data and can be wrong. Check the numbers before you share them."
+                  : "Answers come from live dev data and can be wrong. Check the numbers before you share them."}
               </p>
             </div>
           </>

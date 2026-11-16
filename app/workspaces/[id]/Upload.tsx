@@ -83,7 +83,7 @@ export default function Upload({ id }: { id: string }) {
       setDone(`Stored ${stored.map((s: { sheet: string; rows: number }) => `${n(s.rows)} rows from ${s.sheet}`).join(", ")}.`);
       setPreview(null);
       setFile(null);
-      router.refresh();
+      router.refresh(); // the page moves on to the questions, or keeps the chat
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -127,7 +127,7 @@ export default function Upload({ id }: { id: string }) {
             </>
           )}
         </label>
-        <p className="mt-3 text-xs text-muted">Sample rows are sent to NVIDIA&apos;s AI service to plan the cleanup. Do not upload passwords or patient data.</p>
+        <p className="mt-3 text-xs text-muted">Do not upload passwords or patient data.</p>
         <p role="alert" className="mt-2 min-h-5 text-sm text-secondary">
           {error}
         </p>

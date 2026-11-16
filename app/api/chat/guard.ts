@@ -81,26 +81,28 @@ const SCOPES: Record<string, Document[]> = {
 };
 export const COLLECTIONS = Object.keys(SCOPES);
 
-function scope(collection: unknown, stages: Document[]): Document[] {
-  if (typeof collection !== "string" || !COLLECTIONS.includes(collection)) throw new Error(`Lookup into "${JSON.stringify(collection)}" is not allowed`);
+export type Scopes = Record<string, Document[]>;
+
+function scope(collection: unknown, stages: Document[], scopes: Scopes): Document[] {
+  if (typeof collection !== "string" || !Object.hasOwn(scopes, collection)) throw new Error(`Lookup into "${JSON.stringify(collection)}" is not allowed`);
   if (!Array.isArray(stages)) throw new Error("pipeline must be an array of stages");
-  return [...SCOPES[collection], ...stages.map(scopeStage)];
+  return [...scopes[collection], ...stages.map((st) => scopeStage(st, scopes))];
 }
 
 // Stages only nest inside $lookup, $unionWith and $facet, so these three cover every source at any depth.
-function scopeStage(stage: Document): Document {
+function scopeStage(stage: Document, scopes: Scopes): Document {
   if ("$graphLookup" in stage) throw new Error("$graphLookup is not available; use $lookup");
   if ("$lookup" in stage) {
     const { from, pipeline = [], ...rest } = stage.$lookup;
     // without "from" the pipeline starts with $documents and reads no collection, but its own lookups still get scoped
-    if (from === undefined) return { $lookup: { ...rest, pipeline: (pipeline as Document[]).map(scopeStage) } };
-    return { $lookup: { ...rest, from, pipeline: scope(from, pipeline) } };
+    if (from === undefined) return { $lookup: { ...rest, pipeline: (pipeline as Document[]).map((st) => scopeStage(st, scopes)) } };
+    return { $lookup: { ...rest, from, pipeline: scope(from, pipeline, scopes) } };
   }
   if ("$unionWith" in stage) {
     const u = typeof stage.$unionWith === "string" ? { coll: stage.$unionWith } : stage.$unionWith;
-    return { $unionWith: { ...u, pipeline: scope(u.coll, u.pipeline ?? []) } };
+    return { $unionWith: { ...u, pipeline: scope(u.coll, u.pipeline ?? [], scopes) } };
   }
-  if ("$facet" in stage) return { $facet: Object.fromEntries(Object.entries(stage.$facet).map(([k, p]) => [k, (p as Document[]).map(scopeStage)])) };
+  if ("$facet" in stage) return { $facet: Object.fromEntries(Object.entries(stage.$facet).map(([k, p]) => [k, (p as Document[]).map((st) => scopeStage(st, scopes))])) };
   return stage;
 }
 
@@ -117,14 +119,15 @@ function parse(text: string) {
 
 // Pipelines come from the model, which also reads user text and DB records, so treat them as hostile.
 // Checks run on the *parsed* pipeline re-serialized: a JSON escape like "$out" can't slip past.
-export function parsePipeline(collection: string, pipeline: unknown): Document[] {
+// scopes: the readable collections and their stages; df-dev by default, a workspace passes its own tables
+export function parsePipeline(collection: string, pipeline: unknown, scopes: Scopes = SCOPES): Document[] {
   const stages = parse(typeof pipeline === "string" ? pipeline : JSON.stringify(pipeline));
   if (!Array.isArray(stages)) throw new Error("pipeline must be an array of stages");
   const canon = JSON.stringify(stages);
   // $out/$merge are the only aggregation stages that write; the rest run server-side JS or inspect the server
   if (/"\$(out|merge|where|function|accumulator|currentOp|listSessions)"/.test(canon)) throw new Error("Not allowed: this assistant is read-only");
   if (/"db"\s*:/.test(canon)) throw new Error("Cross-database lookups are not allowed");
-  return scope(collection, stages);
+  return scope(collection, stages, scopes);
 }
 
 export const strip = (k: string, v: unknown) => (SECRETS.includes(k) ? undefined : v);

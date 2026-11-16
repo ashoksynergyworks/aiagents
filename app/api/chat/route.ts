@@ -1,12 +1,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { BSON } from "mongodb";
+import { BSON, type Db } from "mongodb";
 import { connection } from "next/server";
-import { COLLECTIONS, parsePipeline, splitFollowUps, strip, toCsv } from "./guard";
+import { COLLECTIONS, parsePipeline, splitFollowUps, strip, toCsv, type Scopes } from "./guard";
 import { KPI_BY, kpiQuery } from "./kpis";
-import { complete, ContentFilteredError, DEFAULT_MODELS, parseModels, TOOL_NAMES } from "./model";
+import { complete, ContentFilteredError, DEFAULT_MODELS, parseModels, TOOL_NAMES, type Model } from "./model";
 import { currentUser } from "../../auth";
 import { mongo } from "../../db";
+import { getWorkspace, workspaceSystem } from "../../workspaces/server";
 
 // pinned, not taken from the URI: Atlas connection strings carry no db name, so the driver silently fell back to an empty "test"
 // ponytail: tied to docs/df-dev-schema.md below; another DB needs its own schema doc too
@@ -14,6 +15,8 @@ const db = mongo.db("df-dev");
 
 // Tried in order (providers and env vars: parseModels); a request that falls back stays on that model for its remaining steps.
 const MODELS = parseModels(process.env.LLM_MODELS || DEFAULT_MODELS, process.env);
+// NVIDIA only: workspace data must not reach another provider, even by a config mistake (docs/workspaces-plan.md 3.11)
+const WORKSPACE_MODELS = parseModels(process.env.WORKSPACE_MODELS || DEFAULT_MODELS, process.env).filter((m) => m.id.startsWith("nvidia:"));
 const MAX_CHARS = 30_000;
 const CSV_ROWS = 10_000;
 // the schema doc is the model's reference, so a field missing there is a field the agent can't find
@@ -79,22 +82,22 @@ Rules for insights:
 ${SCHEMA}`;
 };
 
-const pipelineArgs = {
-  collection: { type: "string", enum: COLLECTIONS },
+const pipelineArgs = (collections: string[]) => ({
+  collection: { type: "string", enum: collections },
   pipeline: {
     type: "array",
     items: { type: "object" },
-    description: 'Stages, e.g. [{"$match":{"currentStatus":"SUBMITTED"}},{"$group":{"_id":"$pcpId","n":{"$sum":1}}},{"$sort":{"n":-1}}]',
+    description: 'Stages, e.g. [{"$match":{"status":"open"}},{"$group":{"_id":"$owner","n":{"$sum":1}}},{"$sort":{"n":-1}}]',
   },
-};
+});
 
-const tools = [
+const readTools = (collections: string[]) => [
   {
     type: "function",
     function: {
       name: TOOL_NAMES[0],
       description: "Run a read-only MongoDB aggregation pipeline on one collection. Returns at most 50 documents as Extended JSON.",
-      parameters: { type: "object", properties: pipelineArgs, required: ["collection", "pipeline"] },
+      parameters: { type: "object", properties: pipelineArgs(collections), required: ["collection", "pipeline"] },
     },
   },
   {
@@ -104,11 +107,15 @@ const tools = [
       description: `Run a read-only aggregation pipeline and attach the full result (up to ${CSV_ROWS} rows) to the reply as a CSV download. Returns the row count and the first 20 rows.`,
       parameters: {
         type: "object",
-        properties: { ...pipelineArgs, filename: { type: "string", description: 'Short kebab-case name without extension, e.g. "appointments-by-office-2026-09"' } },
+        properties: { ...pipelineArgs(collections), filename: { type: "string", description: 'Short kebab-case name without extension, e.g. "appointments-by-office-2026-09"' } },
         required: ["collection", "pipeline", "filename"],
       },
     },
   },
+];
+
+const tools = [
+  ...readTools(COLLECTIONS),
   {
     type: "function",
     function: {
@@ -135,6 +142,29 @@ const tools = [
 ];
 
 type Args = { collection: string; pipeline: unknown; filename?: string };
+
+// What one request may read and how the model is told about it: the df-dev chat, or one workspace
+type Ctx = { db: Db; scopes?: Scopes; collections: string[]; system: string; tools: typeof tools; models: Model[] };
+const dfDev = (): Ctx => ({ db, collections: COLLECTIONS, system: system(), tools, models: MODELS });
+type Ws = NonNullable<Awaited<ReturnType<typeof getWorkspace>>>;
+function wsCtx(ws: Ws): Ctx {
+  const collections = ws.tables.map((t) => t.collection);
+  // workspace rows hold no hidden fields today; _upload (Phase 5) gets projected out here
+  const scopes: Scopes = Object.fromEntries(collections.map((c) => [c, []]));
+  return { db: mongo.db(ws.dbName), scopes, collections, system: workspaceSystem(ws), tools: readTools(collections) as typeof tools, models: WORKSPACE_MODELS };
+}
+
+// null: no access (404 for a workspace, so ids can't be probed; 403 for df-dev)
+async function context(user: NonNullable<Awaited<ReturnType<typeof currentUser>>>, workspaceId: unknown): Promise<Ctx | Response> {
+  if (workspaceId == null || workspaceId === "") {
+    if (user.role !== "super_admin") return Response.json({ ok: false, error: "Only super admins can use this chat." }, { status: 403 });
+    return dfDev();
+  }
+  const ws = await getWorkspace(String(workspaceId), user);
+  if (!ws) return Response.json({ ok: false, error: "Workspace not found." }, { status: 404 });
+  if (!ws.tables.length) return Response.json({ ok: false, error: "Upload a file to this workspace first." }, { status: 400 });
+  return wsCtx(ws);
+}
 type CsvFile = { name: string; csv: string; rows: number };
 
 // The server-built KPI pipeline goes through the same patient-data scope as the model's own pipelines
@@ -145,20 +175,22 @@ async function kpis(args: unknown) {
   return finish(out);
 }
 
-async function aggregate({ collection, pipeline }: Args, limit: number) {
-  if (!COLLECTIONS.includes(collection)) throw new Error(`Unknown collection "${collection}"`);
-  const stages = parsePipeline(collection, pipeline);
+async function aggregate({ collection, pipeline }: Args, limit: number, ctx: Ctx) {
+  if (!ctx.collections.includes(collection)) throw new Error(`Unknown collection "${collection}"`);
+  const stages = parsePipeline(collection, pipeline, ctx.scopes);
   // no-op when connected; revives the cached client if Mongo was down earlier (driver otherwise stays "Topology is closed")
   await mongo.connect();
-  return db.collection(collection).aggregate([...stages, { $limit: limit }], { maxTimeMS: 15_000 }).toArray();
+  return ctx.db.collection(collection).aggregate([...stages, { $limit: limit }], { maxTimeMS: 15_000 }).toArray();
 }
 
 // DB status for the sidebar; connect() revives a closed client, so the same call is the retry
-export async function GET() {
+export async function GET(req: Request) {
   await connection(); // never prerender a health check
   const user = await currentUser(); // proxy.ts already checks; this is the second lock and tells the UI who is signed in
   if (!user) return Response.json({ ok: false, error: "Please sign in again." }, { status: 401 });
-  if (user.role !== "super_admin") return Response.json({ ok: false, error: "Only super admins can use this chat." }, { status: 403 });
+  const ctx = await context(user, new URL(req.url).searchParams.get("workspaceId"));
+  if (ctx instanceof Response) return ctx;
+  const { db } = ctx;
   const t = Date.now();
   try {
     await mongo.connect();
@@ -175,20 +207,21 @@ export async function POST(req: Request) {
   // short id so interleaved requests can be told apart in the terminal
   const user = await currentUser();
   if (!user) return Response.json({ error: "Please sign in again." }, { status: 401 });
-  // df-dev is for super admins only; workspace chat will pass a workspaceId (docs/workspaces-plan.md 3.8)
-  if (user.role !== "super_admin") return Response.json({ error: "Only super admins can use this chat." }, { status: 403 });
+  const body = await req.json().catch(() => ({}));
+  // df-dev is for super admins only; a workspaceId chats with that workspace (docs/workspaces-plan.md 3.8)
+  const ctx = await context(user, body.workspaceId);
+  if (ctx instanceof Response) return ctx;
   const tag = `[chat ${crypto.randomUUID().slice(0, 8)}]`;
   const t0 = Date.now();
-  if (!MODELS.length) return Response.json({ error: "No usable model. Set LLM_MODELS and the matching API keys in .env, then restart the server." }, { status: 500 });
+  if (!ctx.models.length) return Response.json({ error: "No usable model. Set LLM_MODELS (or WORKSPACE_MODELS) and the matching API keys in .env, then restart the server." }, { status: 500 });
 
-  const body = await req.json().catch(() => ({}));
   if (!Array.isArray(body.messages)) return Response.json({ error: "messages must be an array" }, { status: 400 });
   // only user/assistant text from the client; system and tool turns are ours
   const history = body.messages
     .filter((m: { role: string }) => m.role === "user" || m.role === "assistant")
     .map((m: { role: string; content: unknown }) => ({ role: m.role, content: String(m.content) }));
 
-  console.log(tag, "question:", history.at(-1)?.content, `(${history.length} msgs)`);
+  console.log(tag, ctx.db.databaseName, "question:", history.at(-1)?.content, `(${history.length} msgs)`);
 
   // NDJSON events: status (step label), delta (answer text), reset (drop streamed text), done (final reply), error
   const ac = new AbortController(); // client went away: stream cancelled
@@ -199,7 +232,7 @@ export async function POST(req: Request) {
         if (!signal.aborted) controller.enqueue(new TextEncoder().encode(JSON.stringify(e) + "\n"));
       };
       try {
-        await run(history, tag, t0, signal, send);
+        await run(ctx, history, tag, t0, signal, send);
       } catch (e) {
         console.error(tag, "failed", (e as Error).message);
         send({ type: "error", error: "Something went wrong. Try again." });
@@ -217,8 +250,9 @@ export async function POST(req: Request) {
   return new Response(stream, { headers: { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache, no-transform" } });
 }
 
-async function run(history: object[], tag: string, t0: number, signal: AbortSignal, send: (e: object) => void) {
-  const messages: object[] = [{ role: "system", content: system() }, ...history];
+async function run(ctx: Ctx, history: object[], tag: string, t0: number, signal: AbortSignal, send: (e: object) => void) {
+  const messages: object[] = [{ role: "system", content: ctx.system }, ...history];
+  const allowed = ctx.tools.map((t) => t.function.name as string);
   const used = new Set<string>();
   const files: CsvFile[] = [];
   let failedTools = 0;
@@ -229,13 +263,13 @@ async function run(history: object[], tag: string, t0: number, signal: AbortSign
       return send({ type: "error", error: "No database query succeeded. Check the database connection or rephrase your question." });
     }
     console.log(tag, `done in ${Date.now() - t0}ms`, `used=${[...used]}`, `files=${files.map((f) => `${f.name}(${f.rows})`)}`);
-    send({ type: "done", ...splitFollowUps(reply), used: [...used], files, ...(model > 0 && { fallback: MODELS[model].id }) });
+    send({ type: "done", ...splitFollowUps(reply), used: [...used], files, ...(model > 0 && { fallback: ctx.models[model].id }) });
   };
   const hooks = { signal, onDelta: (text: string) => send({ type: "delta", text }), onReset: () => send({ type: "reset" }) };
 
   for (let step = 0; step < 10; step++) {
     if (step) send({ type: "status", text: "Reading the results" });
-    const out = await complete(messages, tools, MODELS, model, tag, fetch, 5_000, hooks).catch((e: Error) => e);
+    const out = await complete(messages, ctx.tools, ctx.models, model, tag, fetch, 5_000, hooks).catch((e: Error) => e);
     if (signal.aborted) return;
     if (out instanceof Error) {
       console.error(tag, `failed in ${Date.now() - t0}ms`, out.message, out instanceof ContentFilteredError ? "(content filter)" : "");
@@ -253,7 +287,8 @@ async function run(history: object[], tag: string, t0: number, signal: AbortSign
       let content;
       try {
         const args: Args = JSON.parse(call.function.arguments);
-        if (!TOOL_NAMES.includes(call.function.name)) throw new Error("Unknown tool");
+        // kpis reads df-dev, so a workspace chat must never run it even if the model calls it
+        if (!TOOL_NAMES.includes(call.function.name) || !allowed.includes(call.function.name)) throw new Error("Unknown tool");
         const csv = call.function.name === TOOL_NAMES[1];
         send({ type: "status", text: call.function.name === TOOL_NAMES[2] ? "Calculating referral KPIs" : csv ? "Building the CSV" : `Looking up ${args.collection}` });
         console.log(tag, `[db] ${call.function.name}`, args.collection ?? "", typeof args.pipeline === "string" ? args.pipeline : JSON.stringify(args.pipeline ?? args));
@@ -265,7 +300,7 @@ async function run(history: object[], tag: string, t0: number, signal: AbortSign
           args.collection = "appointments";
           console.log(tag, `[db] kpis in ${Date.now() - t}ms`);
         } else {
-          const rows = await aggregate(args, csv ? CSV_ROWS : 50);
+          const rows = await aggregate(args, csv ? CSV_ROWS : 50, ctx);
           // ponytail: row counts only, rows can hold patient data
           console.log(tag, `[db] ${args.collection}: ${rows.length} rows in ${Date.now() - t}ms`);
           result = rows;

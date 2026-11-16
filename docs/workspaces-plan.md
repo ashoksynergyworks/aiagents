@@ -4,6 +4,7 @@ Goal: let invited users upload their own Excel data into a private workspace and
 
 **Status (2026-11-12):** Phase 0 is done. Phase 1 is partly done: super admins can add users from `/users`. A new user is always an `admin`. `addUser()` refuses `super_admin`, so super admins exist only in code. Other roles come later. Still to do in Phase 1: the first-sign-in password change and disabling a user.
 Phase 2 is done: create workspaces (max 2), upload, AI format plan with rule fallback, preview with the column ledger, store. Not built from Phase 2: renaming a column or changing its type in the preview.
+Phases 3 and 4 are done (2026-11-16). After a store, `/workspaces/[id]/context` shows 4 to 6 AI-written questions (from the stored columns and earlier answers, `FORMAT_MODELS`, fixed questions as the fallback), each with the columns it is about and click-to-fill suggested answers. The questions are kept on the workspace and cleared when a table is stored. Saving makes the empty-chat starters and opens `/workspaces/[id]/chat`: the shared `Chat.tsx` with a `workspace` prop, and `/api/chat` with `workspaceId`, a per-request `Ctx`, guard scopes and `WORKSPACE_MODELS` (NVIDIA only, no `kpis`).
 
 ---
 

@@ -76,4 +76,19 @@ assert.deepEqual(split(["A", "Follow-up questions:", "- 1", "- 2", "- 3", "- 4",
 assert.deepEqual(split(["A", "**Follow‑up questions**", "1. Why?  "]), { reply: "A", followUps: ["Why?"] }); // non-breaking hyphen
 assert.deepEqual(split(["A", "Follow-up questions", "None this time."]), { reply: "A\nFollow-up questions\nNone this time.", followUps: [] });
 
+// workspace chat: only that workspace's tables, never df-dev or prototype keys (docs/workspaces-plan.md 3.8)
+const ws = { orders: [], returns: [] };
+assert.deepEqual(parsePipeline("orders", [{ $lookup: { from: "returns", localField: "id", foreignField: "orderId", as: "r" } }], ws), [
+  { $lookup: { from: "returns", localField: "id", foreignField: "orderId", as: "r", pipeline: [] } },
+]);
+for (const [coll, p] of [
+  ["appointments", []], // a df-dev collection is not in the workspace
+  ["orders", [{ $lookup: { from: "appointments", localField: "a", foreignField: "b", as: "x" } }]],
+  ["orders", [{ $unionWith: "users" }]],
+  ["orders", [{ $facet: { a: [{ $lookup: { from: "toString", localField: "a", foreignField: "b", as: "x" } }] } }]],
+  ["__proto__", []],
+  ["orders", [{ $lookup: { from: { db: "ws_other", coll: "orders" }, as: "x", pipeline: [] } }]],
+])
+  assert.throws(() => parsePipeline(coll, p, ws), `${coll} ${JSON.stringify(p)} should be blocked`);
+
 console.log(`guard ok: ${blocked.length} blocked, ${allowed.length} allowed, csv escaping ok, follow-ups split`);
