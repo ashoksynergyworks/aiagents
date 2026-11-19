@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useActionState, useState } from "react";
+import { LiveText, Mic, type Live } from "../../../Mic";
 import { FIELD } from "../../../ui";
 import { saveContext } from "../../actions";
 
@@ -9,6 +10,46 @@ type Item = { question: string; why: string; about: string[]; options: string[];
 
 const CHIP =
   "min-h-9 cursor-pointer rounded-full border border-line bg-surface px-3.5 text-sm text-ink/85 transition-colors duration-150 hover:border-primary/40 focus-visible:outline-3 focus-visible:outline-primary aria-pressed:border-primary aria-pressed:bg-primary-soft aria-pressed:text-primary";
+
+// An answer field with a mic: spoken text is added as a new line, like a picked suggestion.
+function Answer({ id, value, onChange, onSpoken, placeholder }: { id: string; value: string; onChange: (v: string) => void; onSpoken: (text: string) => void; placeholder: string }) {
+  const [live, setLive] = useState<Live | null>(null);
+  const [error, setError] = useState("");
+  return (
+    <>
+      <div className="relative">
+        {live ? (
+          <LiveText live={live} before={value.trim() ? `${value.trimEnd()}\n` : ""} className={`${FIELD} py-3 pr-16 leading-6 whitespace-pre-wrap`} />
+        ) : (
+          <textarea
+            id={id}
+            name="answer"
+            rows={2}
+            maxLength={2000}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={placeholder}
+            className={`${FIELD} resize-y py-3 pr-16 leading-6 field-sizing-content`}
+          />
+        )}
+        {/* the field is kept in the form while the mic is on, so a save then still sends this answer */}
+        {live && <input type="hidden" name="answer" value={value} />}
+        <div className="absolute top-2 right-1">
+          <Mic
+            fieldId={id}
+            label="Speak your answer"
+            onText={onSpoken}
+            setLive={setLive}
+            onError={setError}
+          />
+        </div>
+      </div>
+      <p role="alert" className="mt-1.5 text-sm text-secondary empty:hidden">
+        {error}
+      </p>
+    </>
+  );
+}
 
 export default function Interview({ id, items, ai, skip }: { id: string; items: Item[]; ai: boolean; skip: { href: string; label: string } }) {
   const [error, action, pending] = useActionState(saveContext.bind(null, id), "");
@@ -49,15 +90,12 @@ export default function Interview({ id, items, ai, skip }: { id: string; items: 
                       ))}
                     </ul>
                   )}
-                  <textarea
+                  <Answer
                     id={`a${i}`}
-                    name="answer"
-                    rows={2}
-                    maxLength={2000}
                     value={answers[i]}
-                    onChange={(e) => set(i, e.target.value)}
-                    placeholder={q.options.length ? "Pick a suggestion below, or write your own" : "Write a short answer"}
-                    className={`${FIELD} resize-y py-3 leading-6 field-sizing-content`}
+                    onChange={(v) => set(i, v)}
+                    onSpoken={(t) => setAnswers((a) => a.map((x, k) => (k === i ? (x.trim() ? `${x.trimEnd()}\n${t}` : t) : x)))}
+                    placeholder={q.options.length ? "Pick a suggestion below, write, or speak your own" : "Write or speak a short answer"}
                   />
                   {q.options.length > 0 && (
                     <div role="group" aria-label="Suggested answers" className="mt-2.5 flex flex-wrap gap-2">

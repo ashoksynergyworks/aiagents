@@ -11,6 +11,7 @@ import {
 } from "react";
 import Link from "next/link";
 import Logo from "./Logo";
+import { LiveText, Mic, type Live } from "./Mic";
 import { logout } from "./login/actions";
 
 type CsvFile = { name: string; csv: string; rows: number };
@@ -406,6 +407,7 @@ export default function Chat({
   const [chats, setChats] = useState<Chat[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [input, setInput] = useState("");
+  const [live, setLive] = useState<Live | null>(null); // voice input in progress
   const [loading, setLoading] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState<number | null>(null);
@@ -573,24 +575,36 @@ export default function Chat({
       <span className="grid h-12 shrink-0 place-items-center self-start text-muted">
         <Icon name="search" className="size-6" />
       </span>
-      <textarea
-        id="q"
-        rows={1}
-        autoFocus
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-            e.preventDefault();
-            send(input);
+      {live ? (
+        // live transcript while the mic is on; the final text goes into the textarea for review
+        <LiveText live={live} before={input.trim() ? `${input.trimEnd()} ` : ""} className="block min-h-12 min-w-0 flex-1 py-3 text-base leading-6" />
+      ) : (
+        <textarea
+          id="q"
+          rows={1}
+          autoFocus
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+              e.preventDefault();
+              send(input);
+            }
+          }}
+          placeholder={
+            workspace
+              ? `Ask about ${workspace.tables.length === 1 ? workspace.tables[0] : "your data"}, e.g. ${workspace.starters[0] ?? "what stands out?"}`
+              : "Ask for a report, e.g. referrals per specialist group last month ."
           }
-        }}
-        placeholder={
-          workspace
-            ? `Ask about ${workspace.tables.length === 1 ? workspace.tables[0] : "your data"}, e.g. ${workspace.starters[0] ?? "what stands out?"}`
-            : "Ask for a report, e.g. referrals per specialist group last month ."
-        }
-        className="block max-h-60 min-h-12 min-w-0 flex-1 resize-none bg-transparent py-3 text-base leading-6 outline-none field-sizing-content placeholder:text-muted"
+          className="block max-h-60 min-h-12 min-w-0 flex-1 resize-none bg-transparent py-3 text-base leading-6 outline-none field-sizing-content placeholder:text-muted"
+        />
+      )}
+      <Mic
+        fieldId="q"
+        label="Speak your question"
+        onText={(t) => setInput((i) => (i.trim() ? `${i.trimEnd()} ` : "") + t)}
+        setLive={setLive}
+        onError={setError}
       />
       {/* while this chat's report runs, Send becomes Stop */}
       <button
