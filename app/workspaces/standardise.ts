@@ -7,9 +7,10 @@ export type Type = "text" | "number" | "date" | "boolean";
 export type Order = "DMY" | "MDY" | "YMD";
 export type Cell = string | number | boolean | Date | null;
 export type PlanColumn = { index: number; label: string; type: Type; dateOrder?: Order; unit?: string; description?: string };
-export type Plan = { headerRow: number; dropRows: number[]; columns: PlanColumn[] };
+// dedupe: the user confirmed removing duplicate rows; off unless they tick it
+export type Plan = { headerRow: number; dropRows: number[]; columns: PlanColumn[]; dedupe?: boolean };
 export type Column = { key: string; label: string; source: string; type: Type; unit: string; description: string };
-export type Result = { columns: Column[]; rows: Record<string, Cell>[]; changes: string[]; plan: Plan };
+export type Result = { columns: Column[]; rows: Record<string, Cell>[]; changes: string[]; plan: Plan; duplicates: number };
 
 export const TYPE_LABEL: Record<Type, string> = { text: "Text", number: "Number", date: "Date", boolean: "Yes/No" };
 export const MAX_ROWS = 50_000;
@@ -167,7 +168,7 @@ export function checkPlan(grid: Cell[][], input: unknown): Plan {
     };
   });
   const dropRows = (Array.isArray(p.dropRows) ? p.dropRows : []).filter((i) => Number.isInteger(i) && i > headerRow && i < grid.length);
-  return { headerRow, dropRows: [...new Set(dropRows)], columns };
+  return { headerRow, dropRows: [...new Set(dropRows)], columns, dedupe: p.dedupe === true };
 }
 
 const plural = (n: number, word: string) => `${n.toLocaleString("en-US")} ${word}${n === 1 ? "" : "s"}`;
@@ -233,15 +234,18 @@ export function standardise(raw: unknown[][], input: unknown): Result {
 
   const seen = new Set<string>();
   const rows: Record<string, Cell>[] = [];
+  let duplicates = 0;
   for (let r = 0; r < body.length; r++) {
     const row = Object.fromEntries(columns.map((c, ci) => [c.key, values[ci][r]]));
     const sig = JSON.stringify(row);
-    if (seen.has(sig)) continue;
+    if (seen.has(sig)) {
+      duplicates++;
+      if (plan.dedupe) continue;
+    }
     seen.add(sig);
     rows.push(row);
   }
-  if (rows.length < body.length) changes.push(`Removed ${plural(body.length - rows.length, "duplicate row")}`);
-  return { columns, rows, changes, plan };
+  return { columns, rows, changes, plan, duplicates };
 }
 
 // Facts per column for the chat's schema (docs/workspaces-plan.md 3.8)

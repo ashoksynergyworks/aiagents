@@ -14,6 +14,7 @@ type Sheet = {
   columns?: Column[];
   rows?: Record<string, unknown>[];
   total?: number;
+  duplicates?: number;
   changes?: string[];
 };
 type Preview = { file: string; sheets: Sheet[] };
@@ -52,6 +53,7 @@ export default function Upload({ id }: { id: string }) {
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [skip, setSkip] = useState<Set<string>>(new Set()); // sheets the user unticked
+  const [dedupe, setDedupe] = useState<Set<string>>(new Set()); // sheets where the user confirmed removing duplicates
   const [edits, setEdits] = useState<Record<string, Edit[]>>({});
   const edit = (sheet: string, i: number, patch: Partial<Edit>) =>
     setEdits((prev) => ({ ...prev, [sheet]: prev[sheet].map((e, j) => (j === i ? { ...e, ...patch } : e)) }));
@@ -72,6 +74,7 @@ export default function Upload({ id }: { id: string }) {
     try {
       const p: Preview = await post(id, body);
       setSkip(new Set(p.sheets.filter((s) => s.error).map((s) => s.name)));
+      setDedupe(new Set());
       setEdits(Object.fromEntries(p.sheets.filter((s) => !s.error).map((s) => [s.name, s.columns!.map((c) => ({ label: c.label, rename: true, convert: true, description: c.description }))])));
       setPreview(p);
     } catch (e) {
@@ -92,7 +95,7 @@ export default function Upload({ id }: { id: string }) {
     // the server checks this plan again (checkPlan), so an edited name or type cannot corrupt data
     const plans = chosen.map((s) => ({
       name: s.name,
-      plan: { ...s.plan!, columns: s.plan!.columns.map((pc, i) => {
+      plan: { ...s.plan!, dedupe: dedupe.has(s.name), columns: s.plan!.columns.map((pc, i) => {
         const { label, type, unit, description } = final(s.columns![i], edits[s.name][i]);
         return { ...pc, label, type, unit, description };
       }) },
@@ -115,7 +118,8 @@ export default function Upload({ id }: { id: string }) {
   const other = (s: Sheet) => s.changes!.filter((c) => !/^(Renamed|Read) /.test(c));
   const suggested = (s: Sheet) => s.columns!.flatMap((c, i) => (c.label !== c.source || c.type !== "text" ? [i] : []));
   const chosen = preview?.sheets.filter((s) => !s.error && !skip.has(s.name)) ?? [];
-  const rows = chosen.reduce((sum, s) => sum + (s.total ?? 0), 0);
+  const kept = (s: Sheet) => s.total! - (dedupe.has(s.name) ? s.duplicates! : 0);
+  const rows = chosen.reduce((sum, s) => sum + kept(s), 0);
 
   if (!preview)
     return (
@@ -184,7 +188,7 @@ export default function Upload({ id }: { id: string }) {
               />
               <span className="font-semibold">{s.name}</span>
             </label>
-            {!s.error && <span className="text-sm text-muted">{n(s.total!)} rows · {s.columns!.length} columns</span>}
+            {!s.error && <span className="text-sm text-muted">{n(kept(s))} rows · {s.columns!.length} columns</span>}
             {!s.error && (
               <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${s.ai ? "bg-tertiary/10 text-tertiary" : "bg-sidebar text-muted"}`}>
                 {s.ai ? "Formatted with AI" : "Formatted with rules"}
@@ -214,6 +218,22 @@ export default function Upload({ id }: { id: string }) {
                   </>
                 ) : (
                   <p className="text-sm font-medium text-primary">This sheet is already clean. It is stored as it is.</p>
+                )}
+                {s.duplicates! > 0 && (
+                  <label className="mt-2 flex min-h-11 cursor-pointer items-center gap-3 text-sm">
+                    <input
+                      type="checkbox"
+                      className="size-4 accent-primary"
+                      checked={dedupe.has(s.name)}
+                      onChange={(e) => {
+                        const next = new Set(dedupe);
+                        if (e.target.checked) next.add(s.name);
+                        else next.delete(s.name);
+                        setDedupe(next);
+                      }}
+                    />
+                    Remove {n(s.duplicates!)} duplicate {s.duplicates === 1 ? "row" : "rows"} (rows with the same value in every column). They are kept unless you tick this.
+                  </label>
                 )}
               </div>
 

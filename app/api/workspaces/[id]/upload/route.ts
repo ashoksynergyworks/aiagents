@@ -62,7 +62,7 @@ export async function POST(req: Request, ctx: RouteContext<"/api/workspaces/[id]
         const r = standardise(s.grid, ai);
         // shown unticked with the reason, so one empty sheet can't fail the whole store
         if (!r.rows.length) throw new Error("No data rows are left after the cleanup, so this sheet is skipped.");
-        return { name: s.name, collection: names[i], replaces, ai: ai !== null, plan: r.plan, columns: r.columns, rows: r.rows.slice(0, PREVIEW_ROWS), total: r.rows.length, changes: r.changes };
+        return { name: s.name, collection: names[i], replaces, ai: ai !== null, plan: r.plan, columns: r.columns, rows: r.rows.slice(0, PREVIEW_ROWS), total: r.rows.length, duplicates: r.duplicates, changes: r.changes };
       } catch (e) {
         return { name: s.name, collection: names[i], replaces, error: (e as Error).message };
       }
