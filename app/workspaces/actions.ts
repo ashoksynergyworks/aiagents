@@ -1,8 +1,9 @@
 "use server";
 
+import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { currentUser } from "../auth";
-import { createWorkspace, getWorkspace, makeStarters, workspaces } from "./server";
+import { createWorkspace, deleteWorkspace, getWorkspace, makeStarters, workspaces } from "./server";
 
 export async function create(_: string, form: FormData) {
   const user = await currentUser();
@@ -29,4 +30,11 @@ export async function saveContext(id: string, _: string, form: FormData) {
   const next = { ...ws, context };
   await (await workspaces()).updateOne({ _id: ws._id }, { $set: { context, starters: await makeStarters(next), updatedAt: new Date() } });
   redirect(`/workspaces/${id}`);
+}
+
+export async function remove(id: string) {
+  const user = await currentUser();
+  if (!user) redirect("/login");
+  await deleteWorkspace(id, user);
+  revalidatePath("/workspaces");
 }

@@ -2,7 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { TYPE_LABEL, type Column, type Type } from "../standardise";
+import { TYPE_LABEL, type Column, type Plan, type Type } from "../standardise";
 
 type Sheet = {
   name: string;
@@ -10,13 +10,21 @@ type Sheet = {
   replaces: number | null;
   error?: string;
   ai?: boolean;
-  plan?: unknown;
+  plan?: Plan;
   columns?: Column[];
   rows?: Record<string, unknown>[];
   total?: number;
   changes?: string[];
 };
 type Preview = { file: string; sheets: Sheet[] };
+// the user's choice for one suggested column change; aligned with Sheet.columns (same order as plan.columns)
+type Edit = { label: string; rename: boolean; convert: boolean; description: string };
+
+// the column as it will be stored: an unticked rename keeps the file's name, an unticked type keeps text
+const final = (c: Column, e?: Edit) =>
+  !e
+    ? c
+    : { ...c, label: e.rename ? e.label.trim() || c.source : c.source, type: e.convert ? c.type : ("text" as Type), unit: e.convert ? c.unit : "", description: e.description.trim() };
 
 const n = (x: number) => x.toLocaleString("en-US");
 const PRIMARY =
@@ -44,6 +52,9 @@ export default function Upload({ id }: { id: string }) {
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [skip, setSkip] = useState<Set<string>>(new Set()); // sheets the user unticked
+  const [edits, setEdits] = useState<Record<string, Edit[]>>({});
+  const edit = (sheet: string, i: number, patch: Partial<Edit>) =>
+    setEdits((prev) => ({ ...prev, [sheet]: prev[sheet].map((e, j) => (j === i ? { ...e, ...patch } : e)) }));
   const [busy, setBusy] = useState<"" | "reading" | "storing">("");
   const [error, setError] = useState("");
   const [done, setDone] = useState("");
@@ -61,6 +72,7 @@ export default function Upload({ id }: { id: string }) {
     try {
       const p: Preview = await post(id, body);
       setSkip(new Set(p.sheets.filter((s) => s.error).map((s) => s.name)));
+      setEdits(Object.fromEntries(p.sheets.filter((s) => !s.error).map((s) => [s.name, s.columns!.map((c) => ({ label: c.label, rename: true, convert: true, description: c.description }))])));
       setPreview(p);
     } catch (e) {
       setError((e as Error).message);
@@ -77,7 +89,15 @@ export default function Upload({ id }: { id: string }) {
     setBusy("storing");
     const body = new FormData();
     body.set("file", file);
-    body.set("plans", JSON.stringify(chosen.map((s) => ({ name: s.name, plan: s.plan }))));
+    // the server checks this plan again (checkPlan), so an edited name or type cannot corrupt data
+    const plans = chosen.map((s) => ({
+      name: s.name,
+      plan: { ...s.plan!, columns: s.plan!.columns.map((pc, i) => {
+        const { label, type, unit, description } = final(s.columns![i], edits[s.name][i]);
+        return { ...pc, label, type, unit, description };
+      }) },
+    }));
+    body.set("plans", JSON.stringify(plans));
     try {
       const { stored } = await post(id, body);
       setDone(`Stored ${stored.map((s: { sheet: string; rows: number }) => `${n(s.rows)} rows from ${s.sheet}`).join(", ")}.`);
@@ -91,6 +111,9 @@ export default function Upload({ id }: { id: string }) {
     }
   }
 
+  // ponytail: string match on the server's change text; the "Renamed"/"Read" lines are now the controls below
+  const other = (s: Sheet) => s.changes!.filter((c) => !/^(Renamed|Read) /.test(c));
+  const suggested = (s: Sheet) => s.columns!.flatMap((c, i) => (c.label !== c.source || c.type !== "text" ? [i] : []));
   const chosen = preview?.sheets.filter((s) => !s.error && !skip.has(s.name)) ?? [];
   const rows = chosen.reduce((sum, s) => sum + (s.total ?? 0), 0);
 
@@ -175,13 +198,13 @@ export default function Upload({ id }: { id: string }) {
           ) : (
             <>
               <div className="px-5 py-4">
-                {s.changes!.length ? (
+                {other(s).length || suggested(s).length ? (
                   <>
                     <p className="text-sm font-medium">
-                      We made {s.changes!.length} {s.changes!.length === 1 ? "change" : "changes"}
+                      We suggest {other(s).length + suggested(s).length} {other(s).length + suggested(s).length === 1 ? "change" : "changes"}. Nothing changes until you click Store.
                     </p>
                     <ul className="mt-2 grid gap-1 text-sm text-ink/80 sm:grid-cols-2">
-                      {s.changes!.map((c) => (
+                      {other(s).map((c) => (
                         <li key={c} className="flex gap-2">
                           <span aria-hidden="true" className="mt-2 size-1.5 shrink-0 rounded-full bg-primary/60" />
                           {c}
@@ -194,12 +217,78 @@ export default function Upload({ id }: { id: string }) {
                 )}
               </div>
 
+              {suggested(s).length > 0 && (
+                <fieldset className="border-t border-line px-5 py-4">
+                  <legend className="sr-only">Suggested column changes for {s.name}</legend>
+                  <p className="text-sm font-medium">Column changes</p>
+                  <p className="mt-0.5 text-xs text-muted">Untick a change to keep the column as it is in the file. You can edit each new name.</p>
+                  <ul className="mt-3 divide-y divide-line/70">
+                    {suggested(s).map((i) => {
+                      const c = s.columns![i];
+                      const e = edits[s.name][i];
+                      return (
+                        <li key={c.key} className="flex flex-wrap items-center gap-x-6 gap-y-1 py-2 text-sm">
+                          <span className="w-40 truncate font-medium" title={c.source}>{c.source}</span>
+                          {c.label !== c.source && (
+                            <span className="flex items-center gap-2">
+                              <label className="flex min-h-11 cursor-pointer items-center gap-2">
+                                <input type="checkbox" className="size-4 accent-primary" checked={e.rename} onChange={(ev) => edit(s.name, i, { rename: ev.target.checked })} />
+                                Rename to
+                              </label>
+                              <input
+                                type="text"
+                                aria-label={`New name for ${c.source}`}
+                                maxLength={80}
+                                value={e.label}
+                                disabled={!e.rename}
+                                onChange={(ev) => edit(s.name, i, { label: ev.target.value })}
+                                className="min-h-9 w-56 rounded-lg border border-line bg-paper px-2.5 focus-visible:outline-2 focus-visible:outline-primary disabled:opacity-50"
+                              />
+                            </span>
+                          )}
+                          {c.type !== "text" && (
+                            <label className="flex min-h-11 cursor-pointer items-center gap-2">
+                              <input type="checkbox" className="size-4 accent-primary" checked={e.convert} onChange={(ev) => edit(s.name, i, { convert: ev.target.checked })} />
+                              Store as {TYPE_LABEL[c.type]}
+                              {c.unit && ` in ${c.unit}`}
+                            </label>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </fieldset>
+              )}
+
+              {/* the meaning of each column goes to the chat's schema (description) */}
+              <fieldset className="border-t border-line px-5 py-4">
+                <legend className="sr-only">What the columns of {s.name} mean</legend>
+                <p className="text-sm font-medium">What each column means</p>
+                <p className="mt-0.5 text-xs text-muted">Optional. Add codes, units or business rules. The assistant reads this when it answers questions.</p>
+                <ul className="mt-3 divide-y divide-line/70">
+                  {s.columns!.map((c, i) => (
+                    <li key={c.key} className="flex flex-wrap items-center gap-x-6 gap-y-1 py-2 text-sm">
+                      <span className="w-40 truncate font-medium" title={final(c, edits[s.name][i]).label}>{final(c, edits[s.name][i]).label}</span>
+                      <input
+                        type="text"
+                        aria-label={`Meaning of ${final(c, edits[s.name][i]).label}`}
+                        maxLength={300}
+                        placeholder="e.g. Status code: A = active, C = cancelled"
+                        value={edits[s.name][i].description}
+                        onChange={(ev) => edit(s.name, i, { description: ev.target.value })}
+                        className="min-h-9 min-w-0 flex-1 rounded-lg border border-line bg-paper px-2.5 focus-visible:outline-2 focus-visible:outline-primary"
+                      />
+                    </li>
+                  ))}
+                </ul>
+              </fieldset>
+
               {/* the column ledger: each header shows the type and, when renamed, the name in the file */}
               <div className="max-h-[28rem] overflow-auto border-t border-line">
                 <table className="w-full border-collapse text-sm">
                   <thead className="sticky top-0 z-10 bg-sidebar">
                     <tr>
-                      {s.columns!.map((c) => (
+                      {s.columns!.map((col, i) => final(col, edits[s.name]?.[i])).map((c) => (
                         <th key={c.key} scope="col" className="max-w-56 min-w-32 border-b border-line px-3 py-2.5 text-left align-top font-normal">
                           <span className="block font-semibold text-ink">{c.label}</span>
                           <span className="mt-0.5 block text-xs text-muted">

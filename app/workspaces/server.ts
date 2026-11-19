@@ -30,10 +30,13 @@ export async function getWorkspace(id: string, user: User) {
   return (await workspaces()).findOne({ _id: new ObjectId(id), ...(user.role !== "super_admin" && { ownerEmail: user.email }) });
 }
 
+// Super admins have no cap; everyone else gets MAX_WORKSPACES
+export const canCreate = (user: User, count: number) => user.role === "super_admin" || count < MAX_WORKSPACES;
+
 export async function createWorkspace(user: User, name: string) {
   const col = await workspaces();
   // ponytail: count-then-insert can race to 3 on a double submit; a counter doc would make it exact
-  if ((await col.countDocuments({ ownerEmail: user.email })) >= MAX_WORKSPACES)
+  if (!canCreate(user, await col.countDocuments({ ownerEmail: user.email })))
     return { error: `You can have ${MAX_WORKSPACES} workspaces. Delete one to create another.` };
   await col.createIndex({ slug: 1 }, { unique: true });
   const base = slug(name, 30) || "workspace";
@@ -49,6 +52,17 @@ export async function createWorkspace(user: User, name: string) {
     }
   }
   return { error: "Try a different name." };
+}
+
+// Owner only. Drops the workspace database, then the record. The DoctorFare (df-dev) workspace is not a record, so it can't be deleted.
+export async function deleteWorkspace(id: string, user: User) {
+  if (!/^[a-f0-9]{24}$/.test(id)) return false;
+  const col = await workspaces();
+  const ws = await col.findOne({ _id: new ObjectId(id), ownerEmail: user.email });
+  if (!ws?.dbName.startsWith("ws_")) return false; // never drop df-dev or a system database
+  await mongo.db(ws.dbName).dropDatabase();
+  await col.deleteOne({ _id: ws._id });
+  return true;
 }
 
 // ---- reading the file

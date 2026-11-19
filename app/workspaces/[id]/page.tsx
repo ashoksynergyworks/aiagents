@@ -44,7 +44,7 @@ export default async function WorkspacePage({ params, searchParams }: PageProps<
         tables,
         starters: ws.starters?.length ? ws.starters : [...tables.slice(0, 3).map((t) => `Give me a summary of ${t}`), "What stands out in this data?"],
       }}
-      nav={<Nav id={id} workspaces={list.map((w) => ({ id: w._id.toString(), name: w.name }))} hasData={tables.length > 0} answered={answered} data={data} />}
+      nav={<Nav id={id} workspaces={list.map((w) => ({ id: w._id.toString(), name: w.name }))} hasData={tables.length > 0} answered={answered} data={data} doctorfare={me.role === "super_admin"} />}
     >
       {!tables.length ? (
         <main className="flex-1 overflow-y-auto">

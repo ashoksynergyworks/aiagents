@@ -15,8 +15,10 @@ export default function Nav({
   hasData,
   answered,
   data,
+  doctorfare,
 }: {
-  id: string;
+  id: string; // "df-dev" on the DoctorFare chat
+  doctorfare?: boolean; // super admins: the built-in df-dev workspace, listed first
   workspaces: { id: string; name: string }[];
   hasData: boolean;
   answered: boolean;
@@ -38,6 +40,16 @@ export default function Nav({
         </Link>
       </div>
       <ul className="space-y-0.5">
+        {doctorfare && (
+          <li>
+            <Link href="/" aria-current={id === "df-dev" ? "page" : undefined} className={ITEM}>
+              <span aria-hidden className="grid size-6 shrink-0 place-items-center rounded-md bg-linear-to-br from-secondary to-tertiary text-[11px] font-semibold text-paper">
+                D
+              </span>
+              <span className="truncate">DoctorFare</span>
+            </Link>
+          </li>
+        )}
         {workspaces.map((w) => (
           <li key={w.id}>
             <Link href={`/workspaces/${w.id}`} aria-current={w.id === id ? "page" : undefined} className={ITEM}>
